@@ -33,6 +33,7 @@ This project demonstrates an end-to-end **knowledge distillation pipeline** for 
 ### Key Concepts
 
 **Knowledge Distillation** is a model compression technique where:
+
 - A smaller "student" model learns to mimic a larger "teacher" model's behavior
 - Enables deployment on resource-constrained devices
 - Preserves the teacher model's knowledge with reduced computational requirements
@@ -103,12 +104,14 @@ Phase 4: Deployment Optimization
 ### Setup Instructions
 
 1. **Clone the repository:**
+
 ```bash
 git clone https://github.com/RVKarthikeyan/llm-compression-pipeline.git
 cd llm-compression-pipeline
 ```
 
 2. **Install dependencies:**
+
 ```bash
 # Uninstall conflicting packages
 pip uninstall -y cudf-cu12 pylibcudf-cu12
@@ -124,11 +127,13 @@ apt-get install -y tesseract-ocr poppler-utils
 ```
 
 3. **Request model access:**
+
    - Visit [google/gemma-2-2b-it](https://huggingface.co/google/gemma-2-2b-it) and request access
    - Visit [microsoft/Phi-3-mini-4k-instruct](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and request access
    - Access is typically granted within 5-10 minutes
 
 4. **Authenticate with Hugging Face:**
+
 ```python
 from huggingface_hub import login
 login(token="your_hf_token_here")
@@ -139,10 +144,12 @@ login(token="your_hf_token_here")
 ### Basic Usage
 
 1. **Prepare your domain-specific PDF:**
+
    - Place your PDF file in the project directory
    - Update the `pdf_path` variable in the notebook
 
 2. **Run the notebook:**
+
    - Open `llmcompression.ipynb` in Jupyter/Colab
    - Execute cells sequentially
    - Follow the interactive prompts
@@ -154,13 +161,13 @@ login(token="your_hf_token_here")
 
 ### Runtime Expectations
 
-| Phase | Duration | Description |
-|-------|----------|-------------|
-| Setup | 5-10 min | Dependencies and authentication |
-| Knowledge Generation | 15-20 min | PDF extraction and data generation |
-| Model Training | 30-45 min | LoRA fine-tuning (main bottleneck) |
-| Conversion | 10-15 min | GGUF format and quantization |
-| **Total** | **1-2 hours** | Complete pipeline on T4 GPU |
+| Phase                | Duration      | Description                        |
+| -------------------- | ------------- | ---------------------------------- |
+| Setup                | 5-10 min      | Dependencies and authentication    |
+| Knowledge Generation | 15-20 min     | PDF extraction and data generation |
+| Model Training       | 30-45 min     | LoRA fine-tuning (main bottleneck) |
+| Conversion           | 10-15 min     | GGUF format and quantization       |
+| **Total**            | **1-2 hours** | Complete pipeline on T4 GPU        |
 
 ## 📖 Detailed Usage
 
@@ -200,6 +207,7 @@ teacher_model = AutoModelForCausalLM.from_pretrained(
 ### Phase 3: Synthetic Data Generation
 
 The pipeline automatically:
+
 1. Extracts text from PDF using OCR
 2. Chunks content into manageable segments
 3. Generates domain-specific Q&A pairs
@@ -223,6 +231,7 @@ lora_config = LoraConfig(
 ```
 
 Training parameters:
+
 - **Epochs:** 3
 - **Batch Size:** 4
 - **Learning Rate:** 2e-4
@@ -272,36 +281,36 @@ llm-compression-pipeline/
 
 ### Model Configuration
 
-| Component | Specification |
-|-----------|--------------|
-| **Teacher Model** | Google Gemma 2 2B (Instruction-tuned) |
-| **Student Model** | Microsoft Phi-3 Mini (3.8B parameters) |
-| **Architecture** | Transformer-based decoder |
-| **Context Window** | 4096 tokens |
-| **Training Method** | LoRA (Low-Rank Adaptation) |
-| **Trainable Parameters** | ~1% of total parameters |
-| **Quantization (Training)** | 4-bit NF4 with double quantization |
-| **Quantization (Deployment)** | FP16 / Q4_K_M |
-| **Deployment Format** | GGUF (GPT-Generated Unified Format) |
+| Component                     | Specification                          |
+| ----------------------------- | -------------------------------------- |
+| **Teacher Model**             | Google Gemma 2 2B (Instruction-tuned)  |
+| **Student Model**             | Microsoft Phi-3 Mini (3.8B parameters) |
+| **Architecture**              | Transformer-based decoder              |
+| **Context Window**            | 4096 tokens                            |
+| **Training Method**           | LoRA (Low-Rank Adaptation)             |
+| **Trainable Parameters**      | ~1% of total parameters                |
+| **Quantization (Training)**   | 4-bit NF4 with double quantization     |
+| **Quantization (Deployment)** | FP16 / Q4_K_M                          |
+| **Deployment Format**         | GGUF (GPT-Generated Unified Format)    |
 
 ### Hardware Requirements
 
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| **GPU** | 16GB VRAM (T4) | 24GB+ VRAM (A10/A100) |
-| **RAM** | 16GB | 32GB+ |
-| **Storage** | 10GB free | 20GB+ free |
-| **CPU** | 4 cores | 8+ cores |
+| Component   | Minimum        | Recommended           |
+| ----------- | -------------- | --------------------- |
+| **GPU**     | 16GB VRAM (T4) | 24GB+ VRAM (A10/A100) |
+| **RAM**     | 16GB           | 32GB+                 |
+| **Storage** | 10GB free      | 20GB+ free            |
+| **CPU**     | 4 cores        | 8+ cores              |
 
 ### Model Sizes
 
-| Format | Size | Use Case |
-|--------|------|----------|
-| **Base Model** | ~3.8GB | Original Phi-3 Mini |
-| **LoRA Adapter** | ~50MB | Training checkpoint |
-| **Merged Model** | ~7.5GB | Pre-conversion |
-| **FP16 GGUF** | ~2.3GB | High-quality inference |
-| **Q4_K_M GGUF** | ~1.2GB | Mobile deployment ✅ |
+| Format           | Size   | Use Case               |
+| ---------------- | ------ | ---------------------- |
+| **Base Model**   | ~3.8GB | Original Phi-3 Mini    |
+| **LoRA Adapter** | ~50MB  | Training checkpoint    |
+| **Merged Model** | ~7.5GB | Pre-conversion         |
+| **FP16 GGUF**    | ~2.3GB | High-quality inference |
+| **Q4_K_M GGUF**  | ~1.2GB | Mobile deployment ✅   |
 
 ## 📊 Results
 
@@ -318,10 +327,11 @@ llm-compression-pipeline/
 **Query:** "What are the key events in the Olympics?"
 
 **Response (Domain-Specific Model):**
+
 ```
-The Olympics feature a wide range of athletic competitions across multiple sports. 
-Key events include track and field, swimming, gymnastics, and team sports like 
-basketball and soccer. Athletes compete for gold, silver, and bronze medals 
+The Olympics feature a wide range of athletic competitions across multiple sports.
+Key events include track and field, swimming, gymnastics, and team sports like
+basketball and soccer. Athletes compete for gold, silver, and bronze medals
 representing their countries...
 ```
 
@@ -331,38 +341,44 @@ representing their countries...
 ✅ **Lower Costs:** Minimal GPU requirements for deployment  
 ✅ **Domain Expertise:** Specialized knowledge in target domain  
 ✅ **Mobile-Ready:** Runs on smartphones and edge devices  
-✅ **Privacy-Friendly:** Can run entirely offline  
+✅ **Privacy-Friendly:** Can run entirely offline
 
 ## 🎯 Applications
 
 This methodology can be applied to various domains:
 
 ### 1. **Legal Document Analysis**
+
 - Contract interpretation
 - Case law research
 - Regulatory compliance guidance
 
 ### 2. **Medical Literature Comprehension**
+
 - Clinical guidelines assistance
 - Medical research summaries
 - Patient education materials
 
 ### 3. **Technical Documentation**
+
 - API documentation chatbots
 - Software troubleshooting assistants
 - Product manual Q&A systems
 
 ### 4. **Academic Research Support**
+
 - Literature review assistance
 - Citation and reference help
 - Research methodology guidance
 
 ### 5. **Corporate Policy Guidance**
+
 - Employee handbook Q&A
 - Compliance policy interpretation
 - Internal knowledge management
 
 ### 6. **Educational Content**
+
 - Personalized tutoring systems
 - Course material assistants
 - Exam preparation helpers
@@ -372,18 +388,22 @@ This methodology can be applied to various domains:
 ### Common Issues
 
 #### 1. **Authentication Errors (401 Unauthorized)**
+
 **Problem:** Cannot access Hugging Face models
 
 **Solution:**
+
 - Request access to both Gemma 2 2B and Phi-3 Mini models
 - Wait 5-10 minutes for approval
 - Re-authenticate with valid token
 - Use 'Read' or 'Write' token (not 'Fine-grained')
 
 #### 2. **CUDA Out of Memory**
+
 **Problem:** GPU memory exhausted during training
 
 **Solution:**
+
 ```python
 # Reduce batch size
 per_device_train_batch_size = 2  # Instead of 4
@@ -397,27 +417,33 @@ torch.cuda.empty_cache()
 ```
 
 #### 3. **PDF Extraction Failures**
+
 **Problem:** Cannot extract text from PDF
 
 **Solution:**
+
 - Verify PDF is not password-protected
 - Check PDF file path and spelling
 - Install OCR dependencies: `apt-get install tesseract-ocr poppler-utils`
 - Try alternative: Use `pdfplumber` for complex PDFs
 
 #### 4. **Empty Training Dataset**
+
 **Problem:** Data generation produces no examples
 
 **Solution:**
+
 - Verify teacher model loaded successfully
 - Check PDF contains sufficient text
 - Customize `domain_prompts` list with specific questions
 - Review generation logs for errors
 
 #### 5. **GGUF Conversion Errors**
+
 **Problem:** Conversion script fails
 
 **Solution:**
+
 ```bash
 # Update llama.cpp
 cd llama.cpp
@@ -429,9 +455,11 @@ ls merged_model/  # Should contain config.json and safetensors files
 ```
 
 #### 6. **Poor Model Performance**
+
 **Problem:** Low-quality responses from fine-tuned model
 
 **Solution:**
+
 - Increase training epochs (3 → 5)
 - Generate more training examples (50+ recommended)
 - Increase LoRA rank (16 → 32 or 64)
@@ -469,31 +497,37 @@ tail -f training_output.log
 ### Planned Features
 
 1. **Retrieval-Augmented Generation (RAG)**
+
    - Real-time document updates
    - Vector database integration
    - Dynamic knowledge retrieval
 
 2. **Multi-Document Integration**
+
    - Process multiple PDFs simultaneously
    - Cross-document knowledge synthesis
    - Hierarchical knowledge organization
 
 3. **Advanced Quantization**
+
    - Experiment with Q5_K_M and Q6_K
    - Mixed-precision inference
    - Dynamic quantization strategies
 
 4. **Cross-Lingual Support**
+
    - Multi-language knowledge distillation
    - Translation-aware training
    - Multilingual chatbot creation
 
 5. **Continuous Learning**
+
    - Incremental fine-tuning from user interactions
    - Active learning strategies
    - Feedback-driven improvement
 
 6. **Deployment Optimization**
+
    - Docker containerization
    - API endpoint creation (FastAPI/Flask)
    - Cloud deployment templates
@@ -529,12 +563,14 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 ### Models & Frameworks
+
 - **Google** for Gemma 2 2B model
 - **Microsoft** for Phi-3 Mini model
 - **Hugging Face** for Transformers library and model hub
 - **Meta AI** for llama.cpp conversion tools
 
 ### Libraries & Tools
+
 - [PyTorch](https://pytorch.org/) - Deep learning framework
 - [Transformers](https://huggingface.co/docs/transformers/) - Model implementations
 - [PEFT](https://github.com/huggingface/peft) - Parameter-efficient fine-tuning
@@ -543,6 +579,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF format and inference
 
 ### Research & Inspiration
+
 - Hinton et al. - "Distilling the Knowledge in a Neural Network" (2015)
 - Hu et al. - "LoRA: Low-Rank Adaptation of Large Language Models" (2021)
 - GGUF Format - GPT-Generated Unified Format for efficient model deployment
