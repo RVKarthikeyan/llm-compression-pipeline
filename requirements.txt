@@ -1,0 +1,14 @@
+huggingface_hub
+numpy
+torch
+transformers
+accelerate
+bitsandbytes
+tqdm
+pytesseract
+pdf2image
+datasets
+peft
+trl
+sentencepiece
+protobuf
