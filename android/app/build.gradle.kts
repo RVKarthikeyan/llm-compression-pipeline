@@ -32,12 +32,19 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.my_ai"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // ExecuTorch requires API 23+. Do not lower this value.
+        minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // ExecuTorch ships arm64-v8a native libs only.
+        // Limiting to arm64-v8a prevents install on x86/x86_64 emulators
+        // (which would crash with UnsatisfiedLinkError at startup).
+        // Use a real device or an ARM64 emulator (e.g. on Apple Silicon).
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
