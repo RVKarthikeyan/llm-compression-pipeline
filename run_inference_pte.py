@@ -7,9 +7,29 @@ Usage:
 """
 
 import argparse
+import importlib
 import time
 
 import torch
+
+# ---------------------------------------------------------------------------
+# Register ExecuTorch operator kernels (must happen BEFORE loading .pte).
+#
+# The XNNPACK delegate handles most ops, but fallback ops like
+# quantized_decomposed::embedding_byte run on the portable/quantized
+# CPU kernels.  Importing these modules triggers kernel registration.
+# ---------------------------------------------------------------------------
+_KERNEL_LIBS = [
+    "executorch.kernels.portable",   # core portable ops
+    "executorch.kernels.quantized",  # quantized ops (embedding_byte, etc.)
+]
+for _lib in _KERNEL_LIBS:
+    try:
+        importlib.import_module(_lib)
+        print(f"  Registered kernels: {_lib}")
+    except ImportError:
+        print(f"  Warning: could not import {_lib} — some ops may be unavailable")
+
 from executorch.runtime import Runtime, Program, Method
 from transformers import AutoTokenizer
 
