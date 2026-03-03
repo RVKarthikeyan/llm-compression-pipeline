@@ -7,7 +7,11 @@ Usage:
 """
 
 import argparse
+import ctypes
+import glob
 import importlib
+import os
+import sys
 import time
 
 import torch
@@ -15,43 +19,121 @@ import torch
 # ---------------------------------------------------------------------------
 # Register ExecuTorch operator kernels (must happen BEFORE loading .pte).
 #
-# The XNNPACK delegate handles most ops, but fallback ops like
-# quantized_decomposed::embedding_byte run on the portable/quantized
-# CPU kernels.  Importing these modules triggers kernel registration.
+# The XNNPACK delegate handles most delegated ops, but fallback ops like
+# quantized_decomposed::embedding_byte run on CPU kernels that must be
+# explicitly loaded.  We try multiple strategies to ensure the kernel is
+# available.
 # ---------------------------------------------------------------------------
-_KERNEL_LIBS = [
-    "executorch.kernels.portable",   # core portable ops
-    "executorch.kernels.quantized",  # quantized ops (embedding_byte, etc.)
-]
-for _lib in _KERNEL_LIBS:
-    try:
-        importlib.import_module(_lib)
-        print(f"  Registered kernels: {_lib}")
-    except ImportError:
-        print(f"  Warning: could not import {_lib} — some ops may be unavailable")
 
-from executorch.runtime import Runtime, Program, Method
+def _try_import(module_path: str) -> bool:
+    try:
+        importlib.import_module(module_path)
+        print(f"  Loaded: {module_path}")
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
+def _try_load_so(pattern_fragments: list[str]) -> bool:
+    """Search site-packages for a .so matching the pattern and dlopen it."""
+    for sp in sys.path:
+        if not os.path.isdir(sp):
+            continue
+        for frag in pattern_fragments:
+            matches = glob.glob(os.path.join(sp, "**", frag), recursive=True)
+            for so_path in matches:
+                try:
+                    ctypes.CDLL(so_path)
+                    print(f"  Loaded .so: {so_path}")
+                    return True
+                except OSError:
+                    continue
+    return False
+
+
+# Strategy 1: import Python kernel modules (registers via side-effect)
+for mod in [
+    "executorch.kernels.portable",
+    "executorch.kernels.quantized",
+    "executorch.extension.llm.custom_ops",
+]:
+    _try_import(mod)
+
+# Strategy 2: if the quantized kernel still isn't importable via Python,
+# try to find and dlopen the shared library directly.
+_try_load_so([
+    "libquantized_ops_aot_lib.*so*",
+    "libquantized_kernels.*so*",
+    "quantized_ops_aot_lib.*so*",
+    "quantized.*cpython*.so",
+])
+
 from transformers import AutoTokenizer
 
+# ---------------------------------------------------------------------------
+# Model loading — try the high-level Runtime API first, fall back to the
+# lower-level _load_for_executorch pybinding which bundles its own kernel
+# registry and is often more complete.
+# ---------------------------------------------------------------------------
 
-def load_pte(model_path: str) -> Method:
-    """Load a .pte program and return the 'forward' method."""
-    runtime = Runtime.get()
-    program = runtime.load_program(model_path)
-    method = program.load_method("forward")
-    return method
+_load_for_executorch = None
+try:
+    from executorch.extension.pybindings.portable_lib import (
+        _load_for_executorch as _lfe,
+    )
+    _load_for_executorch = _lfe
+    print("  Available: _load_for_executorch (portable_lib)")
+except ImportError:
+    pass
+
+
+def load_pte(model_path: str):
+    """Load a .pte program and return a callable that wraps .forward()."""
+
+    # --- Try high-level Runtime API first ---
+    try:
+        from executorch.runtime import Runtime
+        runtime = Runtime.get()
+        program = runtime.load_program(model_path)
+        method = program.load_method("forward")
+        print("  Loaded via Runtime API")
+        return method
+    except Exception as e:
+        print(f"  Runtime API failed ({e}), trying portable_lib fallback...")
+
+    # --- Fallback: portable_lib._load_for_executorch ---
+    if _load_for_executorch is not None:
+        module = _load_for_executorch(model_path)
+        print("  Loaded via _load_for_executorch")
+        return module
+
+    raise RuntimeError(
+        f"Could not load {model_path}. "
+        "Neither Runtime API nor _load_for_executorch succeeded."
+    )
+
+
+def run_forward(model, input_ids, attention_mask):
+    """Execute forward pass, handling both Runtime Method and portable Module."""
+    # Runtime Method API: method.execute([...])
+    if hasattr(model, "execute"):
+        return model.execute([input_ids, attention_mask])
+    # portable_lib Module API: module.forward((..,...))
+    if hasattr(model, "forward"):
+        return model.forward((input_ids, attention_mask))
+    raise RuntimeError("Model object has neither .execute() nor .forward()")
 
 
 def generate(
-    method: Method,
-    tokenizer: AutoTokenizer,
+    model,
+    tokenizer,
     prompt: str,
     max_new_tokens: int = 64,
     temperature: float = 0.7,
     top_k: int = 50,
     max_seq_len: int = 512,
 ) -> str:
-    """Autoregressive token generation using the ExecuTorch method."""
+    """Autoregressive token generation using the ExecuTorch model."""
 
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(torch.long)
     prompt_len = input_ids.shape[1]
@@ -71,30 +153,26 @@ def generate(
     for step in range(max_new_tokens):
         seq_len = generated_ids.shape[1]
         if seq_len > max_seq_len:
-            # Slide window to stay within the model's supported range
             generated_ids = generated_ids[:, -max_seq_len:]
             seq_len = max_seq_len
 
         attention_mask = torch.ones(1, seq_len, dtype=torch.long)
 
-        # Run the ExecuTorch forward pass
-        outputs = method.execute([generated_ids, attention_mask])
+        outputs = run_forward(model, generated_ids, attention_mask)
+
+        # outputs may be a list/tuple of tensors
         logits = outputs[0]  # shape: [1, seq_len, vocab_size]
 
-        # Take logits for the last position
         next_logits = logits[:, -1, :].float()
 
-        # Apply temperature
         if temperature > 0:
             next_logits = next_logits / temperature
 
-        # Top-k filtering
         if top_k > 0:
             topk_vals, _ = torch.topk(next_logits, top_k, dim=-1)
             threshold = topk_vals[:, -1].unsqueeze(-1)
             next_logits[next_logits < threshold] = float("-inf")
 
-        # Sample or greedy
         if temperature > 0:
             probs = torch.softmax(next_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
@@ -103,7 +181,6 @@ def generate(
 
         generated_ids = torch.cat([generated_ids, next_token], dim=1)
 
-        # Stop on EOS
         if next_token.item() == tokenizer.eos_token_id:
             break
 
@@ -116,7 +193,6 @@ def generate(
     print(f"Generated {n_generated} tokens in {t_elapsed:.2f}s "
           f"({n_generated / t_elapsed:.1f} tok/s)")
 
-    # Decode only the newly generated tokens
     output_text = tokenizer.decode(
         generated_ids[0, prompt_len:], skip_special_tokens=True
     )
@@ -157,19 +233,16 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load tokenizer
     print(f"Loading tokenizer: {args.tokenizer}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 
-    # Load .pte model
     print(f"Loading .pte model: {args.model}")
-    method = load_pte(args.model)
+    model = load_pte(args.model)
     print("Model loaded.\n")
 
-    # Run generation
     print(f"Prompt: {args.prompt}\n")
     output = generate(
-        method=method,
+        model=model,
         tokenizer=tokenizer,
         prompt=args.prompt,
         max_new_tokens=args.max_tokens,
