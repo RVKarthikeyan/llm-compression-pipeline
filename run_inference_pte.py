@@ -46,62 +46,97 @@ def resolve_pte_path(model_arg: str) -> str:
         pte_files = [f for f in os.listdir(model_arg) if f.endswith(".pte")]
         if not pte_files:
             raise FileNotFoundError(f"No .pte files in {model_arg}")
-        # Pick the largest file (most likely the full model)
         pte_files.sort(key=lambda f: os.path.getsize(os.path.join(model_arg, f)), reverse=True)
         return os.path.join(model_arg, pte_files[0])
     raise FileNotFoundError(f"Not a valid file or directory: {model_arg}")
 
 
+def sample_next_token(logits, temperature, top_k):
+    """Sample a single next token from logits [1, 1, vocab_size]."""
+    next_logits = logits[:, -1, :].float()
+
+    if temperature > 0:
+        next_logits = next_logits / temperature
+    if top_k > 0:
+        topk_vals, _ = torch.topk(next_logits, top_k, dim=-1)
+        next_logits[next_logits < topk_vals[:, -1:]] = float("-inf")
+    if temperature > 0:
+        probs = torch.softmax(next_logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1)
+    else:
+        return torch.argmax(next_logits, dim=-1, keepdim=True)
+
+
 def generate(model, tokenizer, prompt, max_new_tokens=64,
              temperature=0.7, top_k=50, max_seq_len=512):
-    """Autoregressive token-by-token generation."""
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(torch.long)
-    prompt_len = input_ids.shape[1]
+    """
+    Token-by-token generation for static-shape ExecuTorch models.
+
+    The XNNPACK recipe from optimum-cli exports models with:
+      - Static input shape (1, 1): one token per forward call
+      - Internal KV-cache as mutable buffers (state persists between calls)
+      - Inputs: (input_ids [1,1], cache_position [1])
+    """
+    token_ids = tokenizer.encode(prompt)
+    prompt_len = len(token_ids)
     if prompt_len >= max_seq_len:
         print(f"Warning: truncating prompt to {max_seq_len} tokens.")
-        input_ids = input_ids[:, :max_seq_len]
+        token_ids = token_ids[:max_seq_len]
         prompt_len = max_seq_len
 
-    generated_ids = input_ids.clone()
-
     print(f"Prompt tokens: {prompt_len}")
-    print("Generating", end="", flush=True)
+
+    # ------------------------------------------------------------------
+    # Prefill: feed each prompt token one at a time to fill the KV-cache
+    # ------------------------------------------------------------------
+    print("Prefilling...", end="", flush=True)
     t_start = time.perf_counter()
 
-    for _ in range(max_new_tokens):
-        seq_len = generated_ids.shape[1]
-        if seq_len > max_seq_len:
-            generated_ids = generated_ids[:, -max_seq_len:]
-            seq_len = max_seq_len
+    for i, tok in enumerate(token_ids):
+        token_tensor = torch.tensor([[tok]], dtype=torch.long)       # (1, 1)
+        pos_tensor = torch.tensor([i], dtype=torch.long)             # (1,)
+        logits = model.forward((token_tensor, pos_tensor))
 
-        attention_mask = torch.ones(1, seq_len, dtype=torch.long)
-        outputs = model.forward((generated_ids, attention_mask))
-        logits = outputs[0]  # [1, seq_len, vocab_size]
-        next_logits = logits[:, -1, :].float()
+    t_prefill = time.perf_counter() - t_start
+    print(f" done ({t_prefill:.2f}s, {prompt_len / t_prefill:.1f} tok/s)")
 
-        if temperature > 0:
-            next_logits = next_logits / temperature
-        if top_k > 0:
-            topk_vals, _ = torch.topk(next_logits, top_k, dim=-1)
-            next_logits[next_logits < topk_vals[:, -1:]] = float("-inf")
-        if temperature > 0:
-            probs = torch.softmax(next_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-        else:
-            next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
+    # ------------------------------------------------------------------
+    # Decode: sample from last logits, then feed new tokens one at a time
+    # ------------------------------------------------------------------
+    print("Generating", end="", flush=True)
+    t_decode_start = time.perf_counter()
 
-        generated_ids = torch.cat([generated_ids, next_token], dim=1)
-        if next_token.item() == tokenizer.eos_token_id:
+    generated_tokens = []
+    logits_out = logits[0] if isinstance(logits, (list, tuple)) else logits
+
+    for step in range(max_new_tokens):
+        next_token = sample_next_token(logits_out, temperature, top_k)
+        tok_id = next_token.item()
+
+        if tok_id == tokenizer.eos_token_id:
             break
+
+        generated_tokens.append(tok_id)
         print(".", end="", flush=True)
 
-    t_elapsed = time.perf_counter() - t_start
-    n_generated = generated_ids.shape[1] - prompt_len
-    print()
-    print(f"Generated {n_generated} tokens in {t_elapsed:.2f}s "
-          f"({n_generated / t_elapsed:.1f} tok/s)")
+        pos = prompt_len + step
+        if pos >= max_seq_len:
+            print("\n  Reached max_seq_len, stopping.")
+            break
 
-    return tokenizer.decode(generated_ids[0, prompt_len:], skip_special_tokens=True)
+        token_tensor = torch.tensor([[tok_id]], dtype=torch.long)    # (1, 1)
+        pos_tensor = torch.tensor([pos], dtype=torch.long)           # (1,)
+        logits = model.forward((token_tensor, pos_tensor))
+        logits_out = logits[0] if isinstance(logits, (list, tuple)) else logits
+
+    t_decode = time.perf_counter() - t_decode_start
+    n_gen = len(generated_tokens)
+    print()
+    print(f"Generated {n_gen} tokens in {t_decode:.2f}s "
+          f"({n_gen / t_decode:.1f} tok/s)" if t_decode > 0 else
+          f"Generated {n_gen} tokens")
+
+    return tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 
 def main():
