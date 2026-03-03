@@ -1,8 +1,9 @@
 """
-Run inference on a .pte file exported via ExecuTorch with XNNPACK.
+Run inference on a .pte file exported via ExecuTorch.
 
 Usage:
     python run_inference_pte.py --model gemma3_8da4w.pte --prompt "Hello"
+    python run_inference_pte.py --model gemma3_cuda.pte --recipe cuda --prompt "Hello"
     python run_inference_pte.py --model ./model_dir/ --prompt "Hello" --max_tokens 128
 
 Exported with:
@@ -21,21 +22,44 @@ import time
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Register ExecuTorch kernels BEFORE loading any .pte file.
-# ---------------------------------------------------------------------------
-for _mod in [
-    "executorch.kernels.portable",
-    "executorch.kernels.quantized",
-    "executorch.extension.llm.custom_ops",
-]:
-    try:
-        importlib.import_module(_mod)
-    except (ImportError, ModuleNotFoundError):
-        pass
 
-from executorch.extension.pybindings.portable_lib import _load_for_executorch
-from transformers import AutoTokenizer
+def register_kernels(recipe: str):
+    """Register ExecuTorch kernels for the chosen recipe."""
+    common = [
+        "executorch.kernels.portable",
+        "executorch.kernels.quantized",
+        "executorch.extension.llm.custom_ops",
+    ]
+    cuda_extra = [
+        "executorch.backends.cuda",
+        "executorch.extension.cuda.backend",
+    ]
+
+    modules = common + (cuda_extra if recipe == "cuda" else [])
+    for mod in modules:
+        try:
+            importlib.import_module(mod)
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+
+def load_model(pte_path: str, recipe: str):
+    """Load a .pte file with the appropriate backend."""
+    if recipe == "cuda":
+        try:
+            from executorch.extension.pybindings.portable_lib import (
+                _load_for_executorch_with_native,
+            )
+            model = _load_for_executorch_with_native(pte_path)
+            print(f"  Loaded via _load_for_executorch_with_native (CUDA)")
+            return model
+        except ImportError:
+            pass
+
+    from executorch.extension.pybindings.portable_lib import _load_for_executorch
+    model = _load_for_executorch(pte_path)
+    print(f"  Loaded via _load_for_executorch")
+    return model
 
 
 def resolve_pte_path(model_arg: str) -> str:
@@ -68,11 +92,11 @@ def sample_next_token(logits, temperature, top_k):
 
 
 def generate(model, tokenizer, prompt, max_new_tokens=64,
-             temperature=0.7, top_k=50, max_seq_len=512):
+             temperature=0.7, top_k=50, max_seq_len=512, device="cpu"):
     """
     Token-by-token generation for static-shape ExecuTorch models.
 
-    The XNNPACK recipe from optimum-cli exports models with:
+    Both XNNPACK and CUDA recipes from optimum-cli export models with:
       - Static input shape (1, 1): one token per forward call
       - Internal KV-cache as mutable buffers (state persists between calls)
       - Inputs: (input_ids [1,1], cache_position [1])
@@ -93,8 +117,8 @@ def generate(model, tokenizer, prompt, max_new_tokens=64,
     t_start = time.perf_counter()
 
     for i, tok in enumerate(token_ids):
-        token_tensor = torch.tensor([[tok]], dtype=torch.long)       # (1, 1)
-        pos_tensor = torch.tensor([i], dtype=torch.long)             # (1,)
+        token_tensor = torch.tensor([[tok]], dtype=torch.long, device=device)
+        pos_tensor = torch.tensor([i], dtype=torch.long, device=device)
         logits = model.forward((token_tensor, pos_tensor))
 
     t_prefill = time.perf_counter() - t_start
@@ -124,8 +148,8 @@ def generate(model, tokenizer, prompt, max_new_tokens=64,
             print("\n  Reached max_seq_len, stopping.")
             break
 
-        token_tensor = torch.tensor([[tok_id]], dtype=torch.long)    # (1, 1)
-        pos_tensor = torch.tensor([pos], dtype=torch.long)           # (1,)
+        token_tensor = torch.tensor([[tok_id]], dtype=torch.long, device=device)
+        pos_tensor = torch.tensor([pos], dtype=torch.long, device=device)
         logits = model.forward((token_tensor, pos_tensor))
         logits_out = logits[0] if isinstance(logits, (list, tuple)) else logits
 
@@ -141,10 +165,13 @@ def generate(model, tokenizer, prompt, max_new_tokens=64,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run inference on a .pte model (ExecuTorch + XNNPACK)"
+        description="Run inference on a .pte model (ExecuTorch)"
     )
     parser.add_argument("--model", type=str, required=True,
                         help="Path to .pte file or directory containing one")
+    parser.add_argument("--recipe", type=str, default="xnnpack",
+                        choices=["xnnpack", "cuda"],
+                        help="Backend recipe used during export (default: xnnpack)")
     parser.add_argument("--tokenizer", type=str, default="google/gemma-3-1b-it",
                         help="HuggingFace tokenizer name or local path")
     parser.add_argument("--prompt", type=str, default="What is the capital of France?")
@@ -154,14 +181,22 @@ def main():
     parser.add_argument("--top_k", type=int, default=50)
     args = parser.parse_args()
 
+    # --- Register kernels for the chosen recipe ----------------------------
+    register_kernels(args.recipe)
+
+    device = "cuda" if args.recipe == "cuda" else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--recipe cuda requires a CUDA-capable GPU")
+
     # --- Tokenizer ---------------------------------------------------------
     print(f"Loading tokenizer: {args.tokenizer}")
+    from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 
     # --- Model (direct local load, no HuggingFace calls) -------------------
     pte_path = resolve_pte_path(args.model)
-    print(f"Loading model: {pte_path}")
-    model = _load_for_executorch(pte_path)
+    print(f"Loading model: {pte_path} (recipe: {args.recipe})")
+    model = load_model(pte_path, args.recipe)
     print("Model loaded.\n")
 
     # --- Generate ----------------------------------------------------------
@@ -172,6 +207,7 @@ def main():
         temperature=args.temperature,
         top_k=args.top_k,
         max_seq_len=args.max_seq_len,
+        device=device,
     )
 
     print(f"\n{'='*60}")
