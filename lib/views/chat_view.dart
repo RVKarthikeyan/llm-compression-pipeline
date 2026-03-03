@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -10,22 +13,34 @@ class ChatView extends ConsumerStatefulWidget {
   ConsumerState<ChatView> createState() => _ChatViewState();
 }
 
-class _ChatViewState extends ConsumerState<ChatView> {
-  final _controller = TextEditingController();
-  final _scrollController = ScrollController();
+class _ChatViewState extends ConsumerState<ChatView>
+    with SingleTickerProviderStateMixin {
+  final _ctrl = TextEditingController();
+  final _scroll = ScrollController();
+  late final AnimationController _pulseCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+  }
 
   @override
   void dispose() {
-    _controller.dispose();
-    _scrollController.dispose();
+    _ctrl.dispose();
+    _scroll.dispose();
+    _pulseCtrl.dispose();
     super.dispose();
   }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
+      if (_scroll.hasClients) {
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
         );
@@ -34,141 +49,424 @@ class _ChatViewState extends ConsumerState<ChatView> {
   }
 
   Future<void> _send() async {
-    final text = _controller.text.trim();
+    final text = _ctrl.text.trim();
     if (text.isEmpty) return;
-    _controller.clear();
+    _ctrl.clear();
     await ref.read(chatProvider.notifier).sendMessage(text);
     _scrollToBottom();
+  }
+
+  Future<void> _loadModel() async {
+    // Let user pick all files at once: .pte + vocab.json + tokenizer_config.json
+    final res = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      allowMultiple: true,
+      dialogTitle: 'Select .pte model + tokenizer files',
+    );
+    if (res == null || res.files.isEmpty) return;
+
+    String? ptePath;
+    String? vocabPath;
+    String? configPath;
+
+    // Sort files by extension / naming convention
+    for (final file in res.files) {
+      final path = file.path;
+      if (path == null) continue;
+      final name = path.split(Platform.pathSeparator).last.toLowerCase();
+      if (name.endsWith('.pte')) {
+        ptePath = path;
+      } else if (name.endsWith('_vocab.json') || name == 'vocab.json') {
+        vocabPath = path;
+      } else if (name.endsWith('_tokenizer_config.json') ||
+          name == 'tokenizer_config.json') {
+        configPath = path;
+      }
+    }
+
+    // If only one file picked, try auto-detect in same directory
+    if (ptePath == null) {
+      // Maybe user picked a single .pte file (old flow)
+      final singlePath = res.files.first.path;
+      if (singlePath != null &&
+          singlePath.toLowerCase().endsWith('.pte')) {
+        ptePath = singlePath;
+      }
+    }
+
+    if (ptePath == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No .pte model file found in selection.'),
+        ),
+      );
+      return;
+    }
+
+    // Try auto-detect from cache directory if not explicitly selected
+    if (vocabPath == null || configPath == null) {
+      final dir = File(ptePath).parent;
+      try {
+        final files = dir.listSync().whereType<File>();
+        for (final f in files) {
+          final name =
+              f.path.split(Platform.pathSeparator).last.toLowerCase();
+          if (vocabPath == null &&
+              (name.endsWith('_vocab.json') || name == 'vocab.json')) {
+            vocabPath = f.path;
+          }
+          if (configPath == null &&
+              (name.endsWith('_tokenizer_config.json') ||
+                  name == 'tokenizer_config.json')) {
+            configPath = f.path;
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!mounted) return;
+
+    if (vocabPath != null && configPath != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Model + tokenizer files found! Loading…'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Tokenizer not found — select all 3 files '
+            '(.pte + vocab.json + tokenizer_config.json) together.',
+          ),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    }
+
+    // Load model + tokenizer via native channel
+    await ref.read(modelProvider.notifier).loadModel(
+          ptePath,
+          vocabPath: vocabPath,
+          configPath: configPath,
+        );
   }
 
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatProvider);
-    final pipeline = ref.watch(pipelineProvider);
-    final isModelLoaded = pipeline.isModelLoaded;
-    final colorScheme = Theme.of(context).colorScheme;
+    final model = ref.watch(modelProvider);
+    final hasModel = model.isLoaded;
+    final dbCount = ref.watch(objectBoxProvider).count;
 
-    return Column(
-      children: [
-        // ── Model status banner ───────────────────────────────────────────
-        if (!isModelLoaded)
-          MaterialBanner(
-            content: const Text(
-              'No model loaded. Go to Pipeline to set up your model.',
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        title: const Text('Chat'),
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        foregroundColor: const Color(0xFF1A1A2E),
+        elevation: 0,
+        actions: [
+          if (chat.messages.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              onPressed: () =>
+                  ref.read(chatProvider.notifier).clearHistory(),
+              tooltip: 'Clear chat',
             ),
-            leading: const Icon(Icons.info_outline),
-            actions: [
-              TextButton(
-                onPressed: () {},
-                child: const Text('Dismiss'),
-              ),
-            ],
-          ),
-
-        // ── Message list ─────────────────────────────────────────────────
-        Expanded(
-          child: chat.messages.isEmpty
-              ? Center(
+        ],
+      ),
+      body: Stack(
+        children: [
+          Column(
+            children: [
+              // ── Model status bar ──────────────────────────────────────
+              if (!hasModel && !model.isLoading)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF3E0),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFFFCC80)),
+                  ),
                   child: Column(
-                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.chat_bubble_outline,
-                          size: 48,
-                          color: colorScheme.outlineVariant),
-                      const SizedBox(height: 12),
-                      Text(
-                        isModelLoaded
-                            ? 'Ask anything about your document.'
-                            : 'Load a model first.',
-                        style: Theme.of(context).textTheme.bodyMedium,
+                      const Row(children: [
+                        Icon(Icons.info_outline,
+                            size: 18, color: Color(0xFFE65100)),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'No model loaded. Select all 3 files together:\n'
+                            '.pte model + vocab.json + tokenizer_config.json',
+                            style: TextStyle(
+                                fontSize: 13, color: Color(0xFFE65100)),
+                          ),
+                        ),
+                      ]),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: _loadModel,
+                          icon: const Icon(Icons.folder_open, size: 18),
+                          label: const Text('Load Model + Tokenizer'),
+                        ),
                       ),
                     ],
                   ),
                 )
-              : ListView.builder(
-                  controller: _scrollController,
-                  padding:
-                      const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                  itemCount: chat.messages.length,
-                  itemBuilder: (ctx, i) {
-                    final msg = chat.messages[i];
-                    return _MessageBubble(message: msg);
-                  },
-                ),
-        ),
-
-        // ── Inferencing indicator ─────────────────────────────────────────
-        if (chat.isInferencing)
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                SizedBox(width: 8),
-                Text('Thinking…'),
-              ],
-            ),
-          ),
-
-        const Divider(height: 1),
-
-        // ── Input bar ────────────────────────────────────────────────────
-        SafeArea(
-          top: false,
-          child: Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    enabled: isModelLoaded && !chat.isInferencing,
-                    maxLines: null,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _send(),
-                    decoration: InputDecoration(
-                      hintText: isModelLoaded
-                          ? 'Ask about your document…'
-                          : 'Load a model first',
-                      border: const OutlineInputBorder(),
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
+              else if (hasModel)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE8F5E9),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(children: [
+                    const Icon(Icons.check_circle,
+                        size: 16, color: Color(0xFF43A047)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '${model.modelPath!.split(Platform.pathSeparator).last}'
+                        '${dbCount > 0 ? '  •  $dbCount chunks in DB' : ''}'
+                        '${model.isDemoMode ? '  •  Demo mode' : ''}',
+                        style: const TextStyle(fontSize: 12),
+                      ),
                     ),
+                    TextButton(
+                      onPressed: _loadModel,
+                      child: const Text('Change',
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                  ]),
+                ),
+
+              // ── Tokenizer warning ─────────────────────────────────────
+              if (model.needsTokenizer)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF8E1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                        color: const Color(0xFFFFE082), width: 0.5),
+                  ),
+                  child: const Row(children: [
+                    Icon(Icons.warning_amber_rounded,
+                        size: 16, color: Color(0xFFF9A825)),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Tokenizer not found. Place vocab.json & '
+                        'tokenizer_config.json in the same folder as your .pte file.',
+                        style: TextStyle(
+                            fontSize: 11, color: Color(0xFFF57F17)),
+                      ),
+                    ),
+                  ]),
+                ),
+
+              // ── Messages ──────────────────────────────────────────────
+              Expanded(
+                child: chat.messages.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.chat_bubble_outline,
+                                size: 48, color: Colors.grey.shade300),
+                            const SizedBox(height: 12),
+                            Text(
+                              hasModel
+                                  ? 'Ask anything about your document'
+                                  : 'Load a model to start',
+                              style: TextStyle(
+                                  color: Colors.grey.shade500,
+                                  fontSize: 14),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        controller: _scroll,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
+                        itemCount: chat.messages.length,
+                        itemBuilder: (_, i) =>
+                            _Bubble(message: chat.messages[i]),
+                      ),
+              ),
+
+              // ── Typing indicator ──────────────────────────────────────
+              if (chat.isInferencing)
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 4),
+                  child: Row(children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.grey.shade400,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text('Thinking…',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade500)),
+                  ]),
+                ),
+
+              // ── Input bar ─────────────────────────────────────────────
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  border:
+                      Border(top: BorderSide(color: Colors.grey.shade200)),
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    child: Row(children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _ctrl,
+                          enabled: hasModel && !chat.isInferencing,
+                          maxLines: null,
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: (_) => _send(),
+                          decoration: InputDecoration(
+                            hintText: hasModel
+                                ? 'Ask about your document…'
+                                : 'Load a model first',
+                            filled: true,
+                            fillColor: const Color(0xFFF5F5F5),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none,
+                            ),
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 10),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: hasModel
+                              ? const Color(0xFF4F56C7)
+                              : Colors.grey.shade300,
+                          shape: BoxShape.circle,
+                        ),
+                        child: IconButton(
+                          onPressed: hasModel && !chat.isInferencing
+                              ? _send
+                              : null,
+                          icon: const Icon(Icons.send, size: 18),
+                          color: Colors.white,
+                        ),
+                      ),
+                    ]),
                   ),
                 ),
-                const SizedBox(width: 8),
-                IconButton.filled(
-                  onPressed:
-                      isModelLoaded && !chat.isInferencing ? _send : null,
-                  icon: const Icon(Icons.send),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ),
-      ],
+
+          // ── Full-screen loading overlay while model is loading ─────
+          if (model.isLoading)
+            Container(
+              color: Colors.white.withOpacity(0.92),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FadeTransition(
+                      opacity: Tween(begin: 0.3, end: 1.0)
+                          .animate(_pulseCtrl),
+                      child: Container(
+                        padding: const EdgeInsets.all(28),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFEEF0FF),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.psychology_outlined,
+                          size: 56,
+                          color: Color(0xFF4F56C7),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 32),
+                    const Text(
+                      'Loading Model…',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: 180,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: const LinearProgressIndicator(
+                          minHeight: 4,
+                          backgroundColor: Color(0xFFEEF0FF),
+                          color: Color(0xFF4F56C7),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'This may take 1-2 minutes.\nPlease keep the app open.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade500,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Message bubble
+// Chat bubble
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _MessageBubble extends StatelessWidget {
+class _Bubble extends StatelessWidget {
   final ChatMessage message;
-  const _MessageBubble({required this.message});
+  const _Bubble({required this.message});
 
   @override
   Widget build(BuildContext context) {
     final isUser = message.role == 'user';
-    final colorScheme = Theme.of(context).colorScheme;
 
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -176,31 +474,76 @@ class _MessageBubble extends StatelessWidget {
         constraints: BoxConstraints(
           maxWidth: MediaQuery.of(context).size.width * 0.78,
         ),
-        child: Card(
+        child: Container(
           margin: const EdgeInsets.symmetric(vertical: 4),
-          color: isUser
-              ? colorScheme.primaryContainer
-              : colorScheme.surfaceContainerHigh,
-          child: Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  isUser ? 'You' : 'AI',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: isUser
-                        ? colorScheme.primary
-                        : colorScheme.secondary,
+          padding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: isUser
+                ? const Color(0xFF4F56C7)
+                : const Color(0xFFF5F5F5),
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(16),
+              topRight: const Radius.circular(16),
+              bottomLeft: Radius.circular(isUser ? 16 : 4),
+              bottomRight: Radius.circular(isUser ? 4 : 16),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // No-context warning badge
+              if (!isUser && message.noContextWarning) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 4),
+                  margin: const EdgeInsets.only(bottom: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF8E1),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                        color: const Color(0xFFFFE082), width: 0.5),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.warning_amber_rounded,
+                          size: 14, color: Color(0xFFF9A825)),
+                      SizedBox(width: 4),
+                      Text(
+                        'No relevant context found — answering from model knowledge',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFFF57F17),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 4),
-                Text(message.content),
               ],
-            ),
+              Text(
+                message.content,
+                style: TextStyle(
+                  color:
+                      isUser ? Colors.white : const Color(0xFF1A1A2E),
+                  fontSize: 14,
+                ),
+              ),
+              if (!isUser &&
+                  message.ragContext != null &&
+                  message.ragContext!.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  '📚 ${message.ragContext!.length} context chunk(s) used',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.grey.shade500,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ],
           ),
         ),
       ),

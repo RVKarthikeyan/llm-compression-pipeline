@@ -11,26 +11,24 @@ import '../services/objectbox_service.dart';
 // Infrastructure providers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// ObjectBoxService is initialized in main() and overridden via
-/// ProviderScope(overrides: [...]). All access goes through this provider.
 final objectBoxProvider = Provider<ObjectBoxService>((ref) {
   throw UnimplementedError('objectBoxProvider must be overridden in main()');
 });
 
-final backendServiceProvider = Provider<BackendService>((_) => BackendService());
+final backendServiceProvider =
+    Provider<BackendService>((_) => BackendService());
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Secure Storage (HF Token)
+// ─────────────────────────────────────────────────────────────────────────────
 
 const _storage = FlutterSecureStorage();
 const _hfTokenKey = 'hf_access_token';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Settings state
-// ─────────────────────────────────────────────────────────────────────────────
-
 class SettingsNotifier extends AsyncNotifier<String> {
   @override
-  Future<String> build() async {
-    return await _storage.read(key: _hfTokenKey) ?? '';
-  }
+  Future<String> build() async =>
+      await _storage.read(key: _hfTokenKey) ?? '';
 
   Future<void> saveToken(String token) async {
     await _storage.write(key: _hfTokenKey, value: token);
@@ -42,170 +40,113 @@ final settingsProvider =
     AsyncNotifierProvider<SettingsNotifier, String>(SettingsNotifier.new);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Pipeline state
+// Model state (loading / loaded / error)
 // ─────────────────────────────────────────────────────────────────────────────
 
-enum PipelineStatus {
-  idle,
-  processingPdf,
-  uploadingPdf,
-  waitingBackend,
-  readyToDownload,
-  downloading,
-  downloaded,
-  loadingModel,
-  modelLoaded,
-}
+enum ModelLoadState { idle, loading, loaded, error }
 
-class PipelineState {
-  final PipelineStatus status;
-  final String? selectedPdfPath;
-  final double downloadProgress;
-  final String? downloadedModelPath;
-  final String? errorMessage;
+class ModelState {
+  final ModelLoadState loadState;
+  final String? modelPath;
+  final String? vocabPath;      // *_vocab.json
+  final String? configPath;     // *_tokenizer_config.json
+  final String? statusMessage;
+  final bool hasTokenizer;
 
-  const PipelineState({
-    this.status = PipelineStatus.idle,
-    this.selectedPdfPath,
-    this.downloadProgress = 0.0,
-    this.downloadedModelPath,
-    this.errorMessage,
+  const ModelState({
+    this.loadState = ModelLoadState.idle,
+    this.modelPath,
+    this.vocabPath,
+    this.configPath,
+    this.statusMessage,
+    this.hasTokenizer = false,
   });
 
-  PipelineState copyWith({
-    PipelineStatus? status,
-    String? selectedPdfPath,
-    double? downloadProgress,
-    String? downloadedModelPath,
-    String? errorMessage,
-  }) {
-    return PipelineState(
-      status: status ?? this.status,
-      selectedPdfPath: selectedPdfPath ?? this.selectedPdfPath,
-      downloadProgress: downloadProgress ?? this.downloadProgress,
-      downloadedModelPath: downloadedModelPath ?? this.downloadedModelPath,
-      errorMessage: errorMessage ?? this.errorMessage,
-    );
-  }
+  ModelState copyWith({
+    ModelLoadState? loadState,
+    String? modelPath,
+    String? vocabPath,
+    String? configPath,
+    String? statusMessage,
+    bool? hasTokenizer,
+  }) =>
+      ModelState(
+        loadState: loadState ?? this.loadState,
+        modelPath: modelPath ?? this.modelPath,
+        vocabPath: vocabPath ?? this.vocabPath,
+        configPath: configPath ?? this.configPath,
+        statusMessage: statusMessage ?? this.statusMessage,
+        hasTokenizer: hasTokenizer ?? this.hasTokenizer,
+      );
 
-  /// True once the native model is loaded and inference is possible.
-  bool get isModelLoaded => status == PipelineStatus.modelLoaded;
+  bool get isLoaded => loadState == ModelLoadState.loaded;
+  bool get isLoading => loadState == ModelLoadState.loading;
+  bool get isDemoMode =>
+      statusMessage != null && statusMessage!.contains('demo');
+  bool get needsTokenizer => isLoaded && !hasTokenizer && !isDemoMode;
 }
 
-class PipelineNotifier extends Notifier<PipelineState> {
+class ModelNotifier extends Notifier<ModelState> {
   static const _channel = MethodChannel('com.example.my_ai/executorch');
 
   @override
-  PipelineState build() => const PipelineState();
+  ModelState build() => const ModelState();
 
-  // ── PDF selection callback (text already extracted + chunks stored) ──────
-
-  void setPdfSelected(String path) {
-    state = state.copyWith(
-      selectedPdfPath: path,
-      status: PipelineStatus.uploadingPdf,
-    );
-  }
-
-  void setUploadComplete() {
-    state = state.copyWith(status: PipelineStatus.waitingBackend);
-  }
-
-  void setBackendReady() {
-    state = state.copyWith(status: PipelineStatus.readyToDownload);
-  }
-
-  void setError(String msg) {
-    state = state.copyWith(
-      status: PipelineStatus.idle,
-      errorMessage: msg,
-    );
-  }
-
-  // ── Download ─────────────────────────────────────────────────────────────
-
-  Future<void> downloadModel() async {
-    final token = await ref.read(settingsProvider.future);
-    if (token.isEmpty) {
-      state = state.copyWith(
-        errorMessage: 'No Hugging Face token set. Go to Settings first.',
-      );
-      return;
-    }
-
-    state = state.copyWith(
-      status: PipelineStatus.downloading,
-      downloadProgress: 0.0,
+  /// Load the .pte model + tokenizer via the native ExecuTorch channel.
+  /// [vocabPath] and [configPath] are the vocab.json and tokenizer_config.json
+  /// files exported from the Colab notebook.
+  Future<void> loadModel(
+    String path, {
+    String? vocabPath,
+    String? configPath,
+  }) async {
+    state = ModelState(
+      loadState: ModelLoadState.loading,
+      modelPath: path,
+      vocabPath: vocabPath,
+      configPath: configPath,
+      statusMessage: 'Loading model into memory…',
     );
 
     try {
-      final file = await ref.read(backendServiceProvider).downloadModel(
-        // Placeholder HF URL — replace with the real endpoint.
-        hfUrl:
-            'https://huggingface.co/my-org/my-model/resolve/main/model.pte',
-        token: token,
-        onProgress: (p) {
-          state = state.copyWith(downloadProgress: p);
-        },
-      );
+      final args = <String, dynamic>{'path': path};
+      if (vocabPath != null) args['vocabPath'] = vocabPath;
+      if (configPath != null) args['configPath'] = configPath;
+
+      final result = await _channel.invokeMethod<String>('loadModel', args);
+
+      final hasTok = result != null &&
+          !result.contains('no_tokenizer') &&
+          !result.contains('demo');
+
       state = state.copyWith(
-        status: PipelineStatus.downloaded,
-        downloadedModelPath: file.path,
-        downloadProgress: 1.0,
-      );
-    } catch (e) {
-      state = state.copyWith(
-        status: PipelineStatus.readyToDownload,
-        errorMessage: 'Download failed: $e',
-      );
-    }
-  }
-
-  // ── Load local .pte file directly (no backend pipeline needed) ─────────────
-
-  Future<void> loadLocalModel(String path) async {
-    state = state.copyWith(status: PipelineStatus.loadingModel);
-    // Brief artificial delay so the UI shows "Loading into memory…" feedback.
-    await Future.delayed(const Duration(milliseconds: 600));
-    state = state.copyWith(
-      status: PipelineStatus.modelLoaded,
-      downloadedModelPath: path,
-    );
-  }
-
-  // ── Load into native ExecuTorch runtime ──────────────────────────────────
-
-  Future<void> loadModel() async {
-    final modelPath = state.downloadedModelPath;
-    if (modelPath == null) return;
-
-    state = state.copyWith(status: PipelineStatus.loadingModel);
-    try {
-      final result = await _channel.invokeMethod<String>(
-        'loadModel',
-        {'path': modelPath},
-      );
-      state = state.copyWith(
-        status: PipelineStatus.modelLoaded,
-        errorMessage: result,
+        loadState: ModelLoadState.loaded,
+        statusMessage: result,
+        hasTokenizer: hasTok,
       );
     } on PlatformException catch (e) {
-      // Native bindings not set up — treat as loaded for demo purposes.
       state = state.copyWith(
-        status: PipelineStatus.modelLoaded,
-        errorMessage: 'Demo mode: ${e.message}',
+        loadState: ModelLoadState.loaded,
+        statusMessage: 'demo: ${e.message}',
       );
     } on MissingPluginException {
       state = state.copyWith(
-        status: PipelineStatus.modelLoaded,
-        errorMessage: 'Demo mode: native channel not registered.',
+        loadState: ModelLoadState.loaded,
+        statusMessage: 'demo: native channel not available',
+      );
+    } catch (e) {
+      state = state.copyWith(
+        loadState: ModelLoadState.error,
+        statusMessage: 'Error: $e',
       );
     }
   }
+
+  void clearModel() => state = const ModelState();
 }
 
-final pipelineProvider =
-    NotifierProvider<PipelineNotifier, PipelineState>(PipelineNotifier.new);
+final modelProvider =
+    NotifierProvider<ModelNotifier, ModelState>(ModelNotifier.new);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chat state
@@ -214,7 +155,14 @@ final pipelineProvider =
 class ChatMessage {
   final String role; // 'user' | 'ai'
   final String content;
-  const ChatMessage({required this.role, required this.content});
+  final List<String>? ragContext;
+  final bool noContextWarning;
+  const ChatMessage({
+    required this.role,
+    required this.content,
+    this.ragContext,
+    this.noContextWarning = false,
+  });
 }
 
 class ChatState {
@@ -223,12 +171,11 @@ class ChatState {
 
   const ChatState({this.messages = const [], this.isInferencing = false});
 
-  ChatState copyWith({List<ChatMessage>? messages, bool? isInferencing}) {
-    return ChatState(
-      messages: messages ?? this.messages,
-      isInferencing: isInferencing ?? this.isInferencing,
-    );
-  }
+  ChatState copyWith({List<ChatMessage>? messages, bool? isInferencing}) =>
+      ChatState(
+        messages: messages ?? this.messages,
+        isInferencing: isInferencing ?? this.isInferencing,
+      );
 }
 
 class ChatNotifier extends Notifier<ChatState> {
@@ -240,81 +187,74 @@ class ChatNotifier extends Notifier<ChatState> {
   Future<void> sendMessage(String userText) async {
     if (userText.trim().isEmpty) return;
 
-    final updatedMessages = [
-      ...state.messages,
-      ChatMessage(role: 'user', content: userText),
-    ];
-    state = state.copyWith(messages: updatedMessages, isInferencing: true);
+    state = state.copyWith(
+      messages: [
+        ...state.messages,
+        ChatMessage(role: 'user', content: userText),
+      ],
+      isInferencing: true,
+    );
+
+    // RAG: retrieve context from ObjectBox vector DB
+    final obs = ref.read(objectBoxProvider);
+    final contextChunks = obs.searchContext(userText);
+    final hasContext = contextChunks.isNotEmpty;
+
+    // Send user text + context separately — native side applies Gemma template
+    final ctx = hasContext ? contextChunks.join('\n') : null;
 
     String aiResponse;
+    bool usedNative = false;
+
     try {
-      // 1. Retrieve context from ObjectBox
-      final obs = ref.read(objectBoxProvider);
-      final chunks = obs.searchContext(userText);
-      final context = chunks.join(' ');
-
-      // 2. Build the RAG prompt
-      final prompt =
-          'Context: $context\n\nQuestion: $userText\nAnswer:';
-
-      // 3. Run on-device inference via ExecuTorch native channel
       aiResponse = await _channel.invokeMethod<String>(
             'runInference',
-            {'prompt': prompt},
+            {
+              'prompt': userText,
+              'context': ctx,
+            },
           ) ??
           '(no response)';
-    } on PlatformException {
-      // Native ExecuTorch bindings not wired up yet — use demo inference.
-      aiResponse = _dummyInference(userText);
+      usedNative = true;
+    } on PlatformException catch (e) {
+      aiResponse = _demo(userText, contextChunks, e.message);
     } on MissingPluginException {
-      // Channel not registered on this platform yet — use demo inference.
-      aiResponse = _dummyInference(userText);
-    } catch (_) {
-      aiResponse = _dummyInference(userText);
+      aiResponse = _demo(userText, contextChunks, null);
+    } catch (e) {
+      aiResponse = _demo(userText, contextChunks, e.toString());
     }
 
-    // Small artificial delay to simulate inference time.
-    await Future.delayed(
-        Duration(milliseconds: 300 + Random().nextInt(700)));
+    // Small delay for demo mode so it feels natural
+    if (!usedNative) {
+      await Future.delayed(
+          Duration(milliseconds: 300 + Random().nextInt(500)));
+    }
 
     state = state.copyWith(
       messages: [
         ...state.messages,
-        ChatMessage(role: 'ai', content: aiResponse),
+        ChatMessage(
+          role: 'ai',
+          content: aiResponse,
+          ragContext: contextChunks,
+          noContextWarning: !hasContext,
+        ),
       ],
       isInferencing: false,
     );
   }
 
-  /// Lightweight demo responder used when native ExecuTorch inference is
-  /// not yet configured.  Replace with real channel call once Android/iOS
-  /// native bindings are added.
-  String _dummyInference(String query) {
-    final q = query.toLowerCase();
-    if (q.contains('hello') || q.contains('hi')) {
-      return 'Hello! I am running in demo mode (Gemma-3-1b INT8 .pte loaded — '
-          'native ExecuTorch channel not yet wired). How can I help you?';
+  String _demo(String query, List<String> chunks, String? error) {
+    if (chunks.isNotEmpty) {
+      final preview = chunks.first.length > 200
+          ? '${chunks.first.substring(0, 200)}…'
+          : chunks.first;
+      return 'Based on your documents:\n\n$preview\n\n'
+          '(Demo mode${error != null ? ': $error' : ''})';
     }
-    if (q.contains('what') && q.contains('model')) {
-      return 'I am Gemma-3-1b-IT quantized to INT8 and exported as a '
-          'ExecuTorch .pte file. In demo mode, responses come from a simple '
-          'rule engine; real on-device inference requires the native '
-          'ExecuTorch Flutter plugin to be linked.';
-    }
-    if (q.contains('compress') || q.contains('quantiz') || q.contains('prune')) {
-      return 'Model compression includes techniques like quantization '
-          '(INT8/INT4), pruning and knowledge distillation. Your model has '
-          'already been INT8-quantized with ExecuTorch and saved as a .pte file.';
-    }
-    if (q.contains('how') && (q.contains('use') || q.contains('work'))) {
-      return 'Once the native ExecuTorch channel is registered in '
-          'android/app/src/main and the .pte model path is passed to it, '
-          'the app will forward your prompt directly to the on-device model '
-          'for inference — no internet required.';
-    }
-    return '(Demo mode) You asked: "$query". '
-        'When the native ExecuTorch plugin is configured, this message will '
-        'be replaced with a real on-device response from your .pte model.';
+    return '(Demo mode) I don\'t have relevant context for: "$query".\n'
+        'Upload a PDF for better answers.'
+        '${error != null ? '\nNative: $error' : ''}';
   }
 
   void clearHistory() => state = const ChatState();

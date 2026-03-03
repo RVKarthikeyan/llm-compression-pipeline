@@ -50,6 +50,7 @@ class ObjectBoxService {
   List<String> searchContext(String query, {int limit = 3}) {
     final keywords = query
         .split(RegExp(r'\s+'))
+        .map((w) => w.replaceAll(RegExp(r'[^\w]'), ''))
         .where((w) => w.length > 3)
         .toList();
 
@@ -75,6 +76,11 @@ class ObjectBoxService {
 
   /// Total number of stored chunks.
   int get count => _box.count();
+
+  /// Returns the first [n] chunk texts for preview purposes.
+  List<String> getSampleChunks({int n = 3}) {
+    return _box.getAll().take(n).map((e) => e.text).toList();
+  }
 
   // ───────────────────────────── Lifecycle ────────────────────────────────
 

@@ -1,71 +1,62 @@
 import 'dart:io';
-import 'package:dio/dio.dart';
-import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
 
-/// Handles all network operations:
-///  • Uploading a PDF to the backend pipeline.
-///  • Downloading a `.pte` model from Hugging Face (with progress).
+/// Backend API service.
+///
+/// All 3 APIs are **dummy stubs** for the MVP — they simulate network
+/// delays and always return success. Replace with real HTTP calls when
+/// the backend is deployed.
 class BackendService {
-  static const String _backendTrainUrl = 'https://api.mybackend.com/train';
+  // ignore: unused_field
+  static const String _baseUrl = 'https://api.localai-backend.com/v1';
 
-  // ───────────────────────── PDF Upload ───────────────────────────────────
+  // ── API 1: Post HF Token ────────────────────────────────────────────────
 
-  /// Uploads [pdfFile] to the backend compression pipeline.
-  ///
-  /// Returns `true` on HTTP 2xx, `false` otherwise.
-  Future<bool> uploadPdf(File pdfFile) async {
-    try {
-      final uri = Uri.parse(_backendTrainUrl);
-      final request = http.MultipartRequest('POST', uri)
-        ..files.add(
-          await http.MultipartFile.fromPath('file', pdfFile.path),
-        );
-      final streamed = await request.send();
-      return streamed.statusCode >= 200 && streamed.statusCode < 300;
-    } catch (_) {
-      // Return true in the PoC so the UI can always proceed.
-      return true;
-    }
-  }
-
-  // ───────────────────────── Model Download ───────────────────────────────
-
-  /// Downloads a `.pte` model from Hugging Face at [hfUrl] using [token].
-  ///
-  /// [onProgress] receives a value in [0.0, 1.0] as bytes arrive.
-  /// Returns the local [File] that was saved, or throws on failure.
-  Future<File> downloadModel({
-    required String hfUrl,
-    required String token,
-    required void Function(double progress) onProgress,
-  }) async {
-    final docsDir = await getApplicationDocumentsDirectory();
-    final savePath = p.join(docsDir.path, 'model.pte');
-
-    final dio = Dio();
-    await dio.download(
-      hfUrl,
-      savePath,
-      options: Options(
-        headers: {'Authorization': 'Bearer $token'},
-      ),
-      onReceiveProgress: (received, total) {
-        if (total > 0) onProgress(received / total);
-      },
-    );
-
-    return File(savePath);
-  }
-
-  // ───────────────────────── Model Status ─────────────────────────────────
-
-  /// Checks if the backend has finished processing.
-  ///
-  /// In this PoC, always returns `true` after an artificial delay.
-  Future<bool> pollModelReady() async {
-    await Future.delayed(const Duration(seconds: 4));
+  /// Posts the Hugging Face access token to the backend.
+  /// Returns `true` on success.
+  Future<bool> postHfToken(String token) async {
+    // TODO: POST $_baseUrl/auth/token  body: { "hf_token": token }
+    await Future.delayed(const Duration(seconds: 1));
     return true;
+  }
+
+  // ── API 2: Upload Encrypted PDF Content ─────────────────────────────────
+
+  /// Uploads AES-encrypted PDF content + key/IV to the backend.
+  /// Returns `true` on success.
+  Future<bool> uploadEncryptedContent({
+    required String encryptedBase64,
+    required String keyBase64,
+    required String ivBase64,
+  }) async {
+    // TODO: POST $_baseUrl/pipeline/upload
+    // body: { "data": encryptedBase64, "key": keyBase64, "iv": ivBase64 }
+    await Future.delayed(const Duration(seconds: 2));
+    return true;
+  }
+
+  // ── API 3: Trigger Pipeline & Get Model ─────────────────────────────────
+
+  /// Triggers the distillation pipeline on the backend.
+  /// Returns a URL for the resulting .pte model (or null on failure).
+  Future<String?> triggerPipeline() async {
+    // TODO: POST $_baseUrl/pipeline/run
+    // response: { "model_url": "https://..." }
+    await Future.delayed(const Duration(seconds: 3));
+    return '$_baseUrl/models/latest.pte';
+  }
+
+  /// Downloads the .pte model file.
+  /// [onProgress] receives values in [0.0 .. 1.0] as bytes arrive.
+  Future<File?> downloadModel({
+    required String url,
+    required String savePath,
+    void Function(double)? onProgress,
+  }) async {
+    // TODO: use Dio to download from url to savePath
+    for (var i = 1; i <= 10; i++) {
+      await Future.delayed(const Duration(milliseconds: 200));
+      onProgress?.call(i / 10);
+    }
+    return null; // dummy — no real file in MVP
   }
 }
