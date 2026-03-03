@@ -2,3 +2,5 @@
 archive
 credentials.json
 token.json
+.pat
+*.pte

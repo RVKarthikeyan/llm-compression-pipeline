@@ -1,15 +1,16 @@
 import os
 import argparse
+import io
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from googleapiclient.errors import HttpError
 
 # If modifying these scopes, delete the file token.json.
-# This scope allows the app to view and manage files it creates.
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+# Added drive.readonly to allow listing and downloading any file.
+SCOPES = ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/drive.readonly']
 
 def authenticate():
     """Handles Google Drive OAuth2.0 Authentication."""
@@ -73,19 +74,91 @@ def upload_file(file_path, drive_name=None, folder_id=None):
     except HttpError as error:
         print(f"An error occurred: {error}")
 
+def list_files(page_size=10, query=None):
+    """Lists the files in Google Drive."""
+    creds = authenticate()
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        
+        print("Fetching files...")
+        results = service.files().list(
+            pageSize=page_size, 
+            fields="nextPageToken, files(id, name, mimeType)",
+            q=query
+        ).execute()
+        items = results.get('files', [])
+
+        if not items:
+            print('No files found.')
+        else:
+            print('Files:')
+            for item in items:
+                print(f"- {item['name']} (ID: {item['id']}, Type: {item['mimeType']})")
+    except HttpError as error:
+        print(f"An error occurred: {error}")
+
+def download_file(file_id, output_path):
+    """Downloads a file from Google Drive."""
+    creds = authenticate()
+    try:
+        service = build('drive', 'v3', credentials=creds)
+
+        # Get file metadata to get the name if output_path is a directory
+        file_metadata = service.files().get(fileId=file_id).execute()
+        file_name = file_metadata.get('name')
+
+        if os.path.isdir(output_path):
+            output_path = os.path.join(output_path, file_name)
+
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        
+        print(f"Downloading '{file_name}'...")
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+            if status:
+                print(f"Download {int(status.progress() * 100)}%.")
+        
+        with open(output_path, 'wb') as f:
+            f.write(fh.getbuffer())
+        
+        print(f"Success! File saved to '{output_path}'")
+
+    except HttpError as error:
+        print(f"An error occurred: {error}")
+
 def main():
-    parser = argparse.ArgumentParser(description="Upload files to Google Drive via CLI.")
-    
-    # Positional argument (Required)
-    parser.add_argument("filepath", help="The local path to the file you want to upload.")
-    
-    # Optional arguments
-    parser.add_argument("-n", "--name", help="Optional: A new name for the file on Google Drive.", default=None)
-    parser.add_argument("-f", "--folder", help="Optional: The ID of the Google Drive folder to upload to.", default=None)
+    parser = argparse.ArgumentParser(description="Google Drive CLI Helper.")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Upload command
+    upload_parser = subparsers.add_parser("upload", help="Upload a file to Google Drive.")
+    upload_parser.add_argument("filepath", help="The local path to the file you want to upload.")
+    upload_parser.add_argument("-n", "--name", help="Optional: A new name for the file on Google Drive.", default=None)
+    upload_parser.add_argument("-f", "--folder", help="Optional: The ID of the Google Drive folder to upload to.", default=None)
+
+    # List command
+    list_parser = subparsers.add_parser("list", help="List files on Google Drive.")
+    list_parser.add_argument("-p", "--pagesize", type=int, default=10, help="Number of files to list.")
+    list_parser.add_argument("-q", "--query", help="Search query (e.g., \"name contains 'model'\").")
+
+    # Download command
+    download_parser = subparsers.add_parser("download", help="Download a file from Google Drive.")
+    download_parser.add_argument("file_id", help="The ID of the file to download.")
+    download_parser.add_argument("-o", "--output", default=".", help="The local path or directory to save the file.")
 
     args = parser.parse_args()
 
-    upload_file(args.filepath, args.name, args.folder)
+    if args.command == "upload":
+        upload_file(args.filepath, args.name, args.folder)
+    elif args.command == "list":
+        list_files(args.pagesize, args.query)
+    elif args.command == "download":
+        download_file(args.file_id, args.output)
+    else:
+        parser.print_help()
 
 if __name__ == '__main__':
     main()
