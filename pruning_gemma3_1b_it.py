@@ -19,13 +19,17 @@ Usage
 -----
     Set HF_TOKEN env variable or edit the HF_TOKEN line below.
     python pruning_gemma3_1b_it.py
+
+    Or import and call:
+        from pruning_gemma3_1b_it import run_pruning_pipeline
+        result = run_pruning_pipeline(hf_token="hf_...", model_path="google/gemma-3-1b-it")
 """
 
 import os
 import shutil
 import torch
 import torch.nn as nn
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from huggingface_hub import login
 from transformers import (
@@ -40,37 +44,31 @@ from peft import LoraConfig, get_peft_model, PeftModel
 
 
 # ─────────────────────────────────────────────
-# 0. Hugging Face Authentication
-# ─────────────────────────────────────────────
-
-HF_TOKEN = os.environ.get("HF_TOKEN", "")   # Preferred: set via env variable
-if not HF_TOKEN:
-    raise ValueError(
-        "HF_TOKEN is not set. "
-        "Export it as an environment variable:  export HF_TOKEN=hf_..."
-    )
-
-login(token=HF_TOKEN, add_to_git_credential=False)
-print("✓ Successfully logged in to Hugging Face!")
-
-
-# ─────────────────────────────────────────────
 # 1. GPU Detection and Configuration
 # ─────────────────────────────────────────────
 
-def get_gpu_optimized_config() -> dict:
+def get_gpu_optimized_config(
+    model_path: str = "google/gemma-3-1b-it",
+    output_dir: str = "./compressed_gemma",
+    lora_output_dir: str = "./lora_adapters",
+    final_merged_dir: str = "./final_healed_model",
+    zip_output: str = "./compressed_gemma_final.zip",
+    layers_to_merge: Optional[List[Tuple[int, int]]] = None,
+    dataset: str = "timdettmers/openassistant-guanaco",
+    config_overrides: Optional[dict] = None,
+) -> dict:
     """Auto-detect GPU and return optimized training configuration."""
 
     base_config = {
-        "base_model": "google/gemma-3-1b-it",
-        "dataset": "timdettmers/openassistant-guanaco",
-        "output_dir": "./compressed_gemma",
-        "lora_output_dir": "./lora_adapters",
-        "final_merged_dir": "./final_healed_model",
-        "zip_output": "./compressed_gemma_final.zip",
+        "base_model": model_path,
+        "dataset": dataset,
+        "output_dir": output_dir,
+        "lora_output_dir": lora_output_dir,
+        "final_merged_dir": final_merged_dir,
+        "zip_output": zip_output,
 
         # Layer pairs to merge (0-indexed). Gemma-3-1B-IT has 26 layers.
-        "layers_to_merge": [(2, 3), (8, 9)],
+        "layers_to_merge": layers_to_merge if layers_to_merge is not None else [(2, 3), (8, 9)],
 
         # LoRA
         "lora_r": 16,
@@ -98,78 +96,80 @@ def get_gpu_optimized_config() -> dict:
             "max_seq_length": 256,
             "fp16": False,
         })
-        return base_config
-
-    gpu_name = torch.cuda.get_device_name(0).lower()
-    gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-
-    print(f"GPU: {torch.cuda.get_device_name(0)}  ({gpu_memory:.1f} GB)")
-
-    if "t4" in gpu_name:
-        print("⚙️  Optimizing for T4 — estimated training time: ~40-55 min")
-        base_config.update({
-            "dataset_split": "train[:1000]",
-            "per_device_train_batch_size": 1,
-            "gradient_accumulation_steps": 8,
-            "max_seq_length": 256,
-            "fp16": True,
-        })
-    elif "l4" in gpu_name:
-        print("⚙️  Optimizing for L4 — estimated training time: ~25-30 min")
-        base_config.update({
-            "dataset_split": "train[:1500]",
-            "per_device_train_batch_size": 8,
-            "gradient_accumulation_steps": 2,
-            "max_seq_length": 512,
-            "fp16": True,
-        })
-    elif "v100" in gpu_name:
-        print("⚙️  Optimizing for V100 — estimated training time: ~30-35 min")
-        base_config.update({
-            "dataset_split": "train[:1200]",
-            "per_device_train_batch_size": 6,
-            "gradient_accumulation_steps": 3,
-            "max_seq_length": 512,
-            "fp16": True,
-        })
-    elif "a100" in gpu_name:
-        print("⚙️  Optimizing for A100 — estimated training time: ~15-20 min")
-        base_config.update({
-            "dataset_split": "train[:2000]",
-            "per_device_train_batch_size": 16,
-            "gradient_accumulation_steps": 1,
-            "max_seq_length": 512,
-            "fp16": True,
-        })
-    elif "h100" in gpu_name:
-        print("⚙️  Optimizing for H100 — estimated training time: ~10-15 min")
-        base_config.update({
-            "dataset_split": "train[:3000]",
-            "per_device_train_batch_size": 32,
-            "gradient_accumulation_steps": 1,
-            "max_seq_length": 512,
-            "fp16": True,
-            "num_train_epochs": 4,
-        })
     else:
-        # Unknown GPU — scale conservatively by VRAM
-        print(f"⚙️  Unknown GPU — scaling conservatively by VRAM ({gpu_memory:.1f} GB)")
-        if gpu_memory >= 40:
-            batch_size, grad_accum = 16, 1
-        elif gpu_memory >= 24:
-            batch_size, grad_accum = 8, 2
-        elif gpu_memory >= 16:
-            batch_size, grad_accum = 4, 4
-        else:
-            batch_size, grad_accum = 2, 8
+        gpu_name = torch.cuda.get_device_name(0).lower()
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
 
-        base_config.update({
-            "dataset_split": "train[:1000]",
-            "per_device_train_batch_size": batch_size,
-            "gradient_accumulation_steps": grad_accum,
-            "max_seq_length": 512,
-            "fp16": True,
-        })
+        print(f"GPU: {torch.cuda.get_device_name(0)}  ({gpu_memory:.1f} GB)")
+
+        if "t4" in gpu_name:
+            print("⚙️  Optimizing for T4 — estimated training time: ~40-55 min")
+            base_config.update({
+                "dataset_split": "train[:1000]",
+                "per_device_train_batch_size": 1,
+                "gradient_accumulation_steps": 8,
+                "max_seq_length": 256,
+                "fp16": True,
+            })
+        elif "l4" in gpu_name:
+            print("⚙️  Optimizing for L4 — estimated training time: ~25-30 min")
+            base_config.update({
+                "dataset_split": "train[:1500]",
+                "per_device_train_batch_size": 8,
+                "gradient_accumulation_steps": 2,
+                "max_seq_length": 512,
+                "fp16": True,
+            })
+        elif "v100" in gpu_name:
+            print("⚙️  Optimizing for V100 — estimated training time: ~30-35 min")
+            base_config.update({
+                "dataset_split": "train[:1200]",
+                "per_device_train_batch_size": 6,
+                "gradient_accumulation_steps": 3,
+                "max_seq_length": 512,
+                "fp16": True,
+            })
+        elif "a100" in gpu_name:
+            print("⚙️  Optimizing for A100 — estimated training time: ~15-20 min")
+            base_config.update({
+                "dataset_split": "train[:2000]",
+                "per_device_train_batch_size": 16,
+                "gradient_accumulation_steps": 1,
+                "max_seq_length": 512,
+                "fp16": True,
+            })
+        elif "h100" in gpu_name:
+            print("⚙️  Optimizing for H100 — estimated training time: ~10-15 min")
+            base_config.update({
+                "dataset_split": "train[:3000]",
+                "per_device_train_batch_size": 32,
+                "gradient_accumulation_steps": 1,
+                "max_seq_length": 512,
+                "fp16": True,
+                "num_train_epochs": 4,
+            })
+        else:
+            print(f"⚙️  Unknown GPU — scaling conservatively by VRAM ({gpu_memory:.1f} GB)")
+            if gpu_memory >= 40:
+                batch_size, grad_accum = 16, 1
+            elif gpu_memory >= 24:
+                batch_size, grad_accum = 8, 2
+            elif gpu_memory >= 16:
+                batch_size, grad_accum = 4, 4
+            else:
+                batch_size, grad_accum = 2, 8
+
+            base_config.update({
+                "dataset_split": "train[:1000]",
+                "per_device_train_batch_size": batch_size,
+                "gradient_accumulation_steps": grad_accum,
+                "max_seq_length": 512,
+                "fp16": True,
+            })
+
+    # Apply any caller-provided overrides last
+    if config_overrides:
+        base_config.update(config_overrides)
 
     return base_config
 
@@ -196,7 +196,6 @@ class LayerCollapser:
         sd1 = layer1.state_dict()
         sd2 = layer2.state_dict()
         merged = {k: (sd1[k] + sd2[k]) / 2.0 for k in sd1 if k in sd2}
-        # Keep any keys that only exist in layer1
         for k in sd1:
             if k not in merged:
                 merged[k] = sd1[k]
@@ -210,7 +209,6 @@ class LayerCollapser:
         print(f"Original model: {original_count} layers")
         print(f"Merging pairs: {layers_to_merge}")
 
-        # Process in reverse order to keep indices stable
         for idx1, idx2 in sorted(layers_to_merge, reverse=True):
             if idx2 >= len(layers_list) or idx1 >= len(layers_list):
                 print(f"  ⚠️  Skipping ({idx1}, {idx2}) — out of range")
@@ -224,12 +222,10 @@ class LayerCollapser:
         self.model.model.layers = nn.ModuleList(layers_list)
         self.model.config.num_hidden_layers = len(layers_list)
 
-        # Re-index layer_idx so the KV cache is addressed correctly
         for i, layer in enumerate(self.model.model.layers):
             if hasattr(layer, "self_attn"):
                 layer.self_attn.layer_idx = i
 
-        # Update layer_types list to match the new layer count
         if hasattr(self.model.config, "layer_types") and self.model.config.layer_types is not None:
             layer_types = list(self.model.config.layer_types)
             for idx1, idx2 in sorted(layers_to_merge, reverse=True):
@@ -302,11 +298,71 @@ def get_dir_size_gb(path: str) -> float:
 
 
 # ─────────────────────────────────────────────
-# 4. Main Pipeline
+# 4. Main Exported Function
 # ─────────────────────────────────────────────
 
-def main():
-    CONFIG = get_gpu_optimized_config()
+def run_pruning_pipeline(
+    model_path: str = "google/gemma-3-1b-it",
+    hf_token: Optional[str] = None,
+    output_dir: str = "./compressed_gemma",
+    lora_output_dir: str = "./lora_adapters",
+    final_merged_dir: str = "./final_healed_model",
+    zip_output: str = "./compressed_gemma_final.zip",
+    layers_to_merge: Optional[List[Tuple[int, int]]] = None,
+    dataset: str = "timdettmers/openassistant-guanaco",
+    config_overrides: Optional[dict] = None,
+) -> dict:
+    """
+    End-to-end pruning + LoRA healing + merge pipeline.
+
+    Parameters
+    ----------
+    model_path : str
+        HuggingFace model ID or local path.
+    hf_token : str | None
+        HuggingFace token. Falls back to ``HF_TOKEN`` env var.
+    output_dir : str
+        Directory for the pruned (collapsed) model.
+    lora_output_dir : str
+        Directory for LoRA adapter checkpoints.
+    final_merged_dir : str
+        Directory for the final merged model.
+    zip_output : str
+        Path for the output zip archive.
+    layers_to_merge : list of (int, int) tuples | None
+        Layer pairs to collapse. Defaults to [(2,3), (8,9)].
+    dataset : str
+        HuggingFace dataset ID for LoRA healing.
+    config_overrides : dict | None
+        Arbitrary overrides applied on top of auto-detected config.
+
+    Returns
+    -------
+    dict with keys: ``pruned_model_dir``, ``final_model_dir``, ``zip_path``,
+    ``original_layers``, ``final_layers``, ``pruned_size_gb``, ``final_size_gb``.
+    """
+
+    # ── HF Authentication ────────────────────────────────────────────────
+    token = hf_token or os.environ.get("HF_TOKEN", "")
+    if not token:
+        raise ValueError(
+            "HF token is empty.\n"
+            "  Pass hf_token= or set the HF_TOKEN environment variable.\n"
+        )
+    login(token=token, add_to_git_credential=False)
+    print("✓ Successfully logged in to Hugging Face!")
+
+    # ── Build config ─────────────────────────────────────────────────────
+    CONFIG = get_gpu_optimized_config(
+        model_path=model_path,
+        output_dir=output_dir,
+        lora_output_dir=lora_output_dir,
+        final_merged_dir=final_merged_dir,
+        zip_output=zip_output,
+        layers_to_merge=layers_to_merge,
+        dataset=dataset,
+        config_overrides=config_overrides,
+    )
 
     print("\n" + "=" * 70)
     print("CONFIGURATION")
@@ -326,11 +382,13 @@ def main():
         CONFIG["base_model"],
         dtype=torch.float16,
         device_map="auto",
-        token=HF_TOKEN,
+        token=token,
     )
-    tokenizer = AutoTokenizer.from_pretrained(CONFIG["base_model"], token=HF_TOKEN)
+    tokenizer = AutoTokenizer.from_pretrained(CONFIG["base_model"], token=token)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    original_layers = model.config.num_hidden_layers
 
     print("\n--- Inference BEFORE pruning ---")
     test_model(model, tokenizer, "What is machine learning?")
@@ -338,6 +396,8 @@ def main():
     print("\nApplying layer collapse...")
     collapser = LayerCollapser(model, tokenizer)
     model = collapser.collapse_layers(CONFIG["layers_to_merge"])
+
+    final_layers = model.config.num_hidden_layers
 
     print("\n--- Inference AFTER pruning (degradation expected) ---")
     test_model(model, tokenizer, "What is machine learning?")
@@ -429,6 +489,9 @@ def main():
     print("✓ Phase 3 complete!\n")
 
     # ── Summary ──────────────────────────────────────────────────────────
+    pruned_size = get_dir_size_gb(CONFIG["output_dir"]) if os.path.exists(CONFIG["output_dir"]) else 0.0
+    final_size = get_dir_size_gb(CONFIG["final_merged_dir"]) if os.path.exists(CONFIG["final_merged_dir"]) else 0.0
+
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)
@@ -441,6 +504,20 @@ def main():
     print(f"  Zip archive : {CONFIG['zip_output']}")
     print("\n✓ Pipeline completed successfully!")
 
+    return {
+        "pruned_model_dir": os.path.abspath(CONFIG["output_dir"]),
+        "final_model_dir": os.path.abspath(CONFIG["final_merged_dir"]),
+        "zip_path": os.path.abspath(CONFIG["zip_output"]),
+        "original_layers": original_layers,
+        "final_layers": final_layers,
+        "pruned_size_gb": pruned_size,
+        "final_size_gb": final_size,
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CLI entry point
+# ═════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    main()
+    run_pruning_pipeline()

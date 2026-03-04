@@ -1,123 +1,207 @@
 import os
+import hashlib
 import shutil
 import uuid
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from huggingface_hub import HfApi, login, snapshot_download, create_repo
 from pathlib import Path
 
-app = FastAPI(title="Gemma Model Processor API")
+from pruning_gemma3_1b_it import run_pruning_pipeline
+from mixed_precision_quantization_executorch import run_mixed_precision_quantization
+
+app = FastAPI(title="Gemma Model Compression Pipeline API")
 
 # Configuration
-UPLOAD_DIR = Path("uploads")
-MODELS_DIR = Path("models")
-PTE_DIR = Path("pte_outputs")
-TARGET_REPO_NAME = "private-pte-models"
+BASE_DIR = Path("workspace")
+TARGET_REPO_NAME = "pte_models"
 
-# Ensure directories exist
-for d in [UPLOAD_DIR, MODELS_DIR, PTE_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-def train_model_logic(model_path: str, pdf_path: str, output_dir: str):
-    """
-    Placeholder for the training/fine-tuning logic using the PDF.
-    """
-    print(f"Starting training for model at {model_path} using {pdf_path}...")
-    # TODO: Implement training logic here
-    pass
+# In-memory store for authenticated users and job statuses
+# In production, replace with a proper database
+user_sessions = {}  # hashed_token -> { "hf_token": str, "username": str }
+job_store = {}      # hashed_token -> { "job_id": str, "status": str, "message": str, "pte_path": str | None }
 
-def convert_to_pte_logic(trained_model_path: str, output_pte_path: str):
-    """
-    Placeholder for the ExecuTorch (.pte) conversion logic.
-    """
-    print(f"Converting trained model at {trained_model_path} to .pte format...")
-    # TODO: Implement PTE conversion logic here
-    # For now, we simulate by creating a dummy file
-    with open(output_pte_path, "w") as f:
-        f.write("dummy pte content")
-    pass
 
-def process_model_workflow(hf_token: str, model_id: str, pdf_path: str, job_id: str):
+def hash_token(hf_token: str) -> str:
+    return hashlib.sha256(hf_token.encode()).hexdigest()
+
+
+def get_user_dir(hashed_token: str) -> Path:
+    user_dir = BASE_DIR / hashed_token
+    user_dir.mkdir(parents=True, exist_ok=True)
+    return user_dir
+
+
+def run_pipeline(hf_token: str, hashed_token: str, model_id: str):
     """
-    Orchestrates the download, training, conversion, and upload.
+    Orchestrates: prune + LoRA heal -> quantize to PTE -> create repo -> upload.
     """
+    user_dir = get_user_dir(hashed_token)
+    job = job_store[hashed_token]
+
     try:
-        # 1. Authenticate with Hugging Face
         login(token=hf_token)
         api = HfApi(token=hf_token)
-        user_info = api.whoami()
-        username = user_info['name']
-        
-        # 2. Download the base model
-        print(f"Downloading model {model_id}...")
-        local_model_path = MODELS_DIR / job_id
-        snapshot_download(repo_id=model_id, local_dir=local_model_path, token=hf_token)
+        username = api.whoami()["name"]
 
-        # 3. Training (Placeholder)
-        trained_model_dir = MODELS_DIR / f"{job_id}_trained"
-        trained_model_dir.mkdir(exist_ok=True)
-        train_model_logic(str(local_model_path), pdf_path, str(trained_model_dir))
+        # 1. Pruning + LoRA healing
+        job["status"] = "pruning"
+        job["message"] = "Running pruning and LoRA healing..."
 
-        # 4. PTE Conversion (Placeholder)
-        pte_filename = f"{model_id.split('/')[-1]}_{job_id}.pte"
-        pte_output_path = PTE_DIR / pte_filename
-        convert_to_pte_logic(str(trained_model_dir), str(pte_output_path))
+        pruned_output_dir = str(user_dir / "compressed_gemma")
+        lora_output_dir = str(user_dir / "lora_adapters")
+        final_merged_dir = str(user_dir / "final_healed_model")
+        zip_output = str(user_dir / "compressed_gemma_final.zip")
 
-        # 5. Upload to private repository
+        pruning_result = run_pruning_pipeline(
+            model_path=model_id,
+            hf_token=hf_token,
+            output_dir=pruned_output_dir,
+            lora_output_dir=lora_output_dir,
+            final_merged_dir=final_merged_dir,
+            zip_output=zip_output,
+        )
+
+        # 2. Mixed-precision quantization + ExecuTorch PTE conversion
+        job["status"] = "quantizing"
+        job["message"] = "Running mixed-precision quantization and PTE conversion..."
+
+        pte_output_dir = str(user_dir / "pte_output")
+        model_short_name = model_id.split("/")[-1]
+        pte_filename = f"{model_short_name}_int8.pte"
+
+        quantization_result = run_mixed_precision_quantization(
+            model_path=pruning_result["final_model_dir"],
+            hf_token=hf_token,
+            output_dir=pte_output_dir,
+            output_filename=pte_filename,
+        )
+
+        pte_output_path = quantization_result["output_path"]
+
+        # 3. Create private HF repo and upload
+        job["status"] = "uploading"
+        job["message"] = "Uploading PTE file to Hugging Face..."
         repo_id = f"{username}/{TARGET_REPO_NAME}"
-        print(f"Uploading to {repo_id}...")
-        
-        # Create repo if it doesn't exist
-        try:
-            create_repo(repo_id=repo_id, repo_type="model", private=True, token=hf_token, exist_ok=True)
-        except Exception as e:
-            print(f"Repo creation info: {e}")
-
+        create_repo(
+            repo_id=repo_id,
+            repo_type="model",
+            private=True,
+            token=hf_token,
+            exist_ok=True,
+        )
         api.upload_file(
-            path_or_fileobj=str(pte_output_path),
+            path_or_fileobj=pte_output_path,
             path_in_repo=pte_filename,
             repo_id=repo_id,
-            repo_type="model"
+            repo_type="model",
         )
-        print(f"Job {job_id} completed successfully.")
+
+        job["status"] = "completed"
+        job["message"] = (
+            f"Pipeline completed. PTE uploaded to {repo_id}/{pte_filename} "
+            f"({quantization_result['size_mb']:.1f} MB)"
+        )
+        job["pte_path"] = pte_output_path
 
     except Exception as e:
-        print(f"Error in job {job_id}: {str(e)}")
-    finally:
-        # Cleanup (Optional: keep or remove local files)
-        # shutil.rmtree(local_model_path, ignore_errors=True)
-        # os.remove(pdf_path)
-        pass
+        job["status"] = "failed"
+        job["message"] = f"Pipeline failed: {str(e)}"
 
-@app.post("/process-model")
-async def process_model(
+
+@app.post("/auth")
+async def authenticate(hf_token: str = Form(...)):
+    """
+    Validate the HF token, create a workspace folder for the user.
+    """
+    try:
+        api = HfApi(token=hf_token)
+        user_info = api.whoami()
+        username = user_info["name"]
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid Hugging Face token.")
+
+    hashed = hash_token(hf_token)
+    get_user_dir(hashed)
+
+    user_sessions[hashed] = {"hf_token": hf_token, "username": username}
+
+    return {
+        "status": "authenticated",
+        "username": username,
+        "user_hash": hashed,
+    }
+
+
+@app.post("/trigger-pipeline")
+async def trigger_pipeline(
     background_tasks: BackgroundTasks,
     hf_token: str = Form(...),
     model_id: str = Form(...),
-    pdf_file: UploadFile = File(...)
 ):
     """
-    Endpoint to receive HF token, model ID, and PDF document.
-    Starts the processing in the background.
+    Trigger the full compression pipeline: prune -> quantize -> upload PTE.
     """
-    job_id = str(uuid.uuid4())
-    pdf_path = UPLOAD_DIR / f"{job_id}_{pdf_file.filename}"
-    
-    # Save the uploaded PDF
-    with open(pdf_path, "wb") as buffer:
-        shutil.copyfileobj(pdf_file.file, buffer)
+    hashed = hash_token(hf_token)
 
-    # Add the heavy processing to background tasks
-    background_tasks.add_task(process_model_workflow, hf_token, model_id, str(pdf_path), job_id)
+    if hashed not in user_sessions: 
+        raise HTTPException(status_code=401, detail="Please authenticate first via /auth.")
+
+    # Prevent re-triggering if a job is already running
+    if hashed in job_store and job_store[hashed]["status"] in (
+        "downloading", "pruning", "quantizing", "uploading"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A pipeline is already running (status: {job_store[hashed]['status']}). Wait for it to finish.",
+        )
+
+    job_id = str(uuid.uuid4())
+    job_store[hashed] = {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Pipeline queued.",
+        "pte_path": None,
+    }
+
+    background_tasks.add_task(run_pipeline, hf_token, hashed, model_id)
 
     return {
         "status": "accepted",
         "job_id": job_id,
-        "message": "Model processing started in the background."
+        "message": "Pipeline started in background.",
     }
+
+
+@app.get("/status")
+async def pipeline_status(hf_token: str):
+    """
+    Check whether the PTE file has been generated / pipeline progress.
+    """
+    hashed = hash_token(hf_token)
+
+    if hashed not in user_sessions:
+        raise HTTPException(status_code=401, detail="Please authenticate first via /auth.")
+
+    if hashed not in job_store:
+        return {"status": "no_job", "message": "No pipeline has been triggered yet."}
+
+    job = job_store[hashed]
+    pte_ready = job["pte_path"] is not None and Path(job["pte_path"]).exists()
+
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "message": job["message"],
+        "pte_ready": pte_ready,
+    }
+
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
 
 if __name__ == "__main__":
     import uvicorn
