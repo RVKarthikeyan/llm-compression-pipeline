@@ -224,6 +224,11 @@ class LayerCollapser:
         self.model.model.layers = nn.ModuleList(layers_list)
         self.model.config.num_hidden_layers = len(layers_list)
 
+        # Re-index layer_idx so the KV cache is addressed correctly
+        for i, layer in enumerate(self.model.model.layers):
+            if hasattr(layer, "self_attn"):
+                layer.self_attn.layer_idx = i
+
         # Update layer_types list to match the new layer count
         if hasattr(self.model.config, "layer_types") and self.model.config.layer_types is not None:
             layer_types = list(self.model.config.layer_types)
