@@ -222,7 +222,9 @@ class LayerCollapser:
             layers_list.pop(idx2)
 
         self.model.model.layers = nn.ModuleList(layers_list)
+        self.model.config.num_hidden_layers = len(layers_list)
         print(f"✓ Collapsed: {original_count} → {len(layers_list)} layers")
+        print(f"  Updated config.num_hidden_layers = {len(layers_list)}")
         return self.model
 
 
