@@ -182,12 +182,15 @@ def replace_with_int8(model, dtype):
     replacements = []
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
+            if "lm_head" in name:
+                print(f"  Skipping {name} (keeping FP16)")
+                continue
             wq, sc = _quantize_weight(module.weight.data)
             bias = module.bias.data.to(dtype) if module.bias is not None else None
             replacements.append((name, Int8Linear(wq, sc.to(dtype), bias), "linear"))
         elif isinstance(module, torch.nn.Embedding):
-            wq, sc = _quantize_weight(module.weight.data)
-            replacements.append((name, Int8Embedding(wq, sc.to(dtype), module.padding_idx), "embed"))
+            print(f"  Skipping {name} (keeping FP16)")
+            continue
 
     for name, new_mod, _ in replacements:
         parts = name.split(".")
