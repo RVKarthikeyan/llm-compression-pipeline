@@ -223,6 +223,16 @@ class LayerCollapser:
 
         self.model.model.layers = nn.ModuleList(layers_list)
         self.model.config.num_hidden_layers = len(layers_list)
+
+        # Update layer_types list to match the new layer count
+        if hasattr(self.model.config, "layer_types") and self.model.config.layer_types is not None:
+            layer_types = list(self.model.config.layer_types)
+            for idx1, idx2 in sorted(layers_to_merge, reverse=True):
+                if idx2 < len(layer_types):
+                    layer_types.pop(idx2)
+            self.model.config.layer_types = layer_types
+            print(f"  Updated config.layer_types: {len(layer_types)} entries")
+
         print(f"✓ Collapsed: {original_count} → {len(layers_list)} layers")
         print(f"  Updated config.num_hidden_layers = {len(layers_list)}")
         return self.model
