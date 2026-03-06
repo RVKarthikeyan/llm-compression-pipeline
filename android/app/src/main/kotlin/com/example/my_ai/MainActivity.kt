@@ -29,9 +29,14 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "ExecuTorch"
         private const val CHANNEL = "com.example.my_ai/executorch"
-        private const val MAX_NEW_TOKENS = 512
+        private const val MAX_NEW_TOKENS = 150
         private const val SEQ_LEN = 2048
         private const val TEMPERATURE = 0.0f
+
+        /** EOS markers — if any of these appear as a token, stop generation. */
+        private val EOS_TOKENS = listOf(
+            "<|eot_id|>", "<|end_of_text|>", "<eos>", "<end_of_turn>",
+        )
 
         /** Special tokens to strip from final output. */
         private val SPECIAL_TOKENS = listOf(
@@ -274,6 +279,13 @@ class MainActivity : FlutterActivity() {
                 val callback = object : LlmCallback {
                     override fun onResult(token: String) {
                         if (!stopRequested) {
+                            // Stop if model emits an EOS-like token
+                            if (EOS_TOKENS.any { token.contains(it) }) {
+                                log("EOS token detected at token $tokenCount: \"$token\"")
+                                stopRequested = true
+                                try { llmModule?.stop() } catch (_: Exception) {}
+                                return
+                            }
                             outputBuilder.append(token)
                             tokenCount++
                             if (tokenCount <= 5 || tokenCount % 20 == 0) {
@@ -293,7 +305,13 @@ class MainActivity : FlutterActivity() {
                 val elapsed = System.currentTimeMillis() - t0
                 var output = outputBuilder.toString().trim()
 
-                // Strip any special tokens that leaked through
+                // Truncate at first EOS token (in case stop didn't fire fast enough)
+                for (eos in EOS_TOKENS) {
+                    val idx = output.indexOf(eos)
+                    if (idx >= 0) output = output.substring(0, idx)
+                }
+
+                // Strip any remaining special tokens
                 output = stripSpecialTokens(output)
 
 
@@ -335,13 +353,12 @@ class MainActivity : FlutterActivity() {
         // System message
         sb.append("<|start_header_id|>system<|end_header_id|>\n\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a helpful document assistant. ")
-            sb.append("A document is provided below. Answer the user's question using the document first. ")
-            sb.append("Clearly distinguish what comes from the document vs your own knowledge. ")
-            sb.append("If the document contains the answer, quote or reference the relevant parts. ")
-            sb.append("If the document does not fully answer the question, say so, then add anything you know that might help.")
+            sb.append("You are a helpful document assistant. Be concise — answer in a few sentences unless the user asks for detail. ")
+            sb.append("Answer the user's question using the document first. ")
+            sb.append("If the document contains the answer, state it directly. ")
+            sb.append("If the document does not fully answer the question, say so, then briefly add anything you know that might help.")
         } else {
-            sb.append("You are a helpful assistant. Provide a detailed and complete answer.")
+            sb.append("You are a helpful assistant. Be concise and direct.")
         }
         sb.append("<|eot_id|>")
 
@@ -366,9 +383,8 @@ class MainActivity : FlutterActivity() {
         val sb = StringBuilder()
         sb.append("<bos><start_of_turn>user\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a helpful document assistant. ")
-            sb.append("Answer using the document first, then add your own knowledge if helpful. ")
-            sb.append("Clearly distinguish what comes from the document vs your own knowledge.\n\n")
+            sb.append("You are a helpful document assistant. Be concise — answer in a few sentences unless asked for detail. ")
+            sb.append("Answer using the document first, then briefly add your own knowledge if helpful.\n\n")
             sb.append("DOCUMENT:\n")
             sb.append(context)
             sb.append("\n\nQUESTION: ")
