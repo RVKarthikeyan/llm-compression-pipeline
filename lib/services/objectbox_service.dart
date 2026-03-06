@@ -46,12 +46,12 @@ class ObjectBoxService {
   // ───────────────────────────── Read ──────────────────────────────────────
 
   /// Returns up to [limit] chunks whose text contains any keyword from [query]
-  /// (keyword = word with more than 3 characters).
-  List<String> searchContext(String query, {int limit = 3}) {
+  /// (keyword = word with more than 2 characters, after cleaning punctuation).
+  List<String> searchContext(String query, {int limit = 5}) {
     final keywords = query
         .split(RegExp(r'\s+'))
         .map((w) => w.replaceAll(RegExp(r'[^\w]'), ''))
-        .where((w) => w.length > 3)
+        .where((w) => w.length > 2)
         .toList();
 
     if (keywords.isEmpty) return [];
@@ -68,9 +68,20 @@ class ObjectBoxService {
         .build()
         .find();
 
-    return results
+    // Score results by how many keywords they match
+    final scored = results.map((chunk) {
+      int score = 0;
+      final lower = chunk.text.toLowerCase();
+      for (final kw in keywords) {
+        if (lower.contains(kw.toLowerCase())) score++;
+      }
+      return MapEntry(score, chunk);
+    }).toList()
+      ..sort((a, b) => b.key.compareTo(a.key));
+
+    return scored
         .take(limit)
-        .map((e) => e.text)
+        .map((e) => e.value.text)
         .toList();
   }
 
@@ -80,6 +91,11 @@ class ObjectBoxService {
   /// Returns the first [n] chunk texts for preview purposes.
   List<String> getSampleChunks({int n = 3}) {
     return _box.getAll().take(n).map((e) => e.text).toList();
+  }
+
+  /// Returns ALL chunk texts in stored order.
+  List<String> getAllChunks() {
+    return _box.getAll().map((e) => e.text).toList();
   }
 
   // ───────────────────────────── Lifecycle ────────────────────────────────

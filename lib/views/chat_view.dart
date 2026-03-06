@@ -57,7 +57,7 @@ class _ChatViewState extends ConsumerState<ChatView>
   }
 
   Future<void> _loadModel() async {
-    // Let user pick all files at once: .pte + vocab.json + tokenizer_config.json
+    // Let user pick all files at once: .pte + tokenizer.json (+ optional tokenizer_config.json)
     final res = await FilePicker.platform.pickFiles(
       type: FileType.any,
       allowMultiple: true,
@@ -76,7 +76,9 @@ class _ChatViewState extends ConsumerState<ChatView>
       final name = path.split(Platform.pathSeparator).last.toLowerCase();
       if (name.endsWith('.pte')) {
         ptePath = path;
-      } else if (name.endsWith('_vocab.json') || name == 'vocab.json') {
+      } else if (name == 'tokenizer.json' ||
+          name.endsWith('_vocab.json') ||
+          name == 'vocab.json') {
         vocabPath = path;
       } else if (name.endsWith('_tokenizer_config.json') ||
           name == 'tokenizer_config.json') {
@@ -105,7 +107,7 @@ class _ChatViewState extends ConsumerState<ChatView>
     }
 
     // Try auto-detect from cache directory if not explicitly selected
-    if (vocabPath == null || configPath == null) {
+    if (vocabPath == null) {
       final dir = File(ptePath).parent;
       try {
         final files = dir.listSync().whereType<File>();
@@ -113,7 +115,9 @@ class _ChatViewState extends ConsumerState<ChatView>
           final name =
               f.path.split(Platform.pathSeparator).last.toLowerCase();
           if (vocabPath == null &&
-              (name.endsWith('_vocab.json') || name == 'vocab.json')) {
+              (name == 'tokenizer.json' ||
+                  name.endsWith('_vocab.json') ||
+                  name == 'vocab.json')) {
             vocabPath = f.path;
           }
           if (configPath == null &&
@@ -127,7 +131,7 @@ class _ChatViewState extends ConsumerState<ChatView>
 
     if (!mounted) return;
 
-    if (vocabPath != null && configPath != null) {
+    if (vocabPath != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Model + tokenizer files found! Loading…'),
@@ -138,8 +142,8 @@ class _ChatViewState extends ConsumerState<ChatView>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Tokenizer not found — select all 3 files '
-            '(.pte + vocab.json + tokenizer_config.json) together.',
+            'Tokenizer not found — select .pte + tokenizer.json '
+            '(or vocab.json + tokenizer_config.json) together.',
           ),
           duration: Duration(seconds: 4),
         ),
@@ -203,8 +207,8 @@ class _ChatViewState extends ConsumerState<ChatView>
                         SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            'No model loaded. Select all 3 files together:\n'
-                            '.pte model + vocab.json + tokenizer_config.json',
+                            'No model loaded. Select files together:\n'
+                            '.pte model + tokenizer.json',
                             style: TextStyle(
                                 fontSize: 13, color: Color(0xFFE65100)),
                           ),
@@ -271,8 +275,8 @@ class _ChatViewState extends ConsumerState<ChatView>
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Tokenizer not found. Place vocab.json & '
-                        'tokenizer_config.json in the same folder as your .pte file.',
+                        'Tokenizer not found. Place tokenizer.json '
+                        'in the same folder as your .pte file.',
                         style: TextStyle(
                             fontSize: 11, color: Color(0xFFF57F17)),
                       ),

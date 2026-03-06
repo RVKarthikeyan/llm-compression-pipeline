@@ -5,18 +5,25 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Minimal on-device tokenizer that uses the vocab.json + tokenizer_config.json
- * exported from the Colab notebook.
+ * Minimal on-device tokenizer matching SentencePiece (Unigram) behaviour
+ * used by Gemma models. Uses vocab.json + tokenizer_config.json.
  *
- * Encoding:  greedy longest-prefix matching on the vocab (good enough for Gemma
- *            SentencePiece-based models when the full vocab is available).
- * Decoding:  direct id → string lookup.
+ * Supports two vocab.json formats:
+ *   Format A (id→token): { "0": "<pad>", "1": "<eos>", ... }
+ *   Format B (token→id): { "<pad>": 0, "<eos>": 1, ... }
+ *
+ * Encoding:  SentencePiece-style preprocessing (space→▁, prepend ▁)
+ *            then greedy longest-prefix matching.
+ * Decoding:  direct id → string lookup, ▁ → space.
  */
 class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
 
     companion object {
         private const val TAG = "Tokenizer"
         // Gemma default special token IDs
+        private const val DEFAULT_BOS = 2
+        private const val DEFAULT_EOS = 1
+        private const val DEFAULT_PAD = 0
         private const val DEFAULT_START_OF_TURN = 106
         private const val DEFAULT_END_OF_TURN = 107
     }
@@ -37,22 +44,34 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
     private val maxTokenLen: Int
 
     init {
-        // ── Load vocab.json: { "0": "<pad>", "1": "<eos>", ... } ────────
+        // ── Load vocab.json ─────────────────────────────────────────────
         val vocabText = File(vocabJsonPath).readText(Charsets.UTF_8)
         val vocabObj = JSONObject(vocabText)
 
         val id2tok = mutableMapOf<Int, String>()
         val tok2id = mutableMapOf<String, Int>()
 
+        // Auto-detect format: check first key
+        val firstKey = vocabObj.keys().next()
+        val isIdToToken = firstKey.toIntOrNull() != null
+
+        Log.i(TAG, "Vocab format: ${if (isIdToToken) "id->token" else "token->id"}, first key: $firstKey")
+
         val keys = vocabObj.keys()
         while (keys.hasNext()) {
             val key = keys.next()
-            val id = key.toInt()
-            val token = vocabObj.getString(key)
-            id2tok[id] = token
-            // For encoding, prefer the LOWEST id when there are duplicates
-            if (token !in tok2id) {
-                tok2id[token] = id
+            if (isIdToToken) {
+                // Format A: { "0": "<pad>", ... }
+                val id = key.toInt()
+                val token = vocabObj.getString(key)
+                id2tok[id] = token
+                if (token !in tok2id) tok2id[token] = id
+            } else {
+                // Format B: { "<pad>": 0, ... }
+                val token = key
+                val id = vocabObj.getInt(key)
+                id2tok[id] = token
+                if (token !in tok2id) tok2id[token] = id
             }
         }
         id2token = id2tok
@@ -60,13 +79,17 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
         vocabSize = id2tok.size
         maxTokenLen = tok2id.keys.maxOfOrNull { it.length } ?: 1
 
+        Log.i(TAG, "Vocab loaded: $vocabSize entries, maxTokenLen=$maxTokenLen")
+        val samples = id2tok.entries.take(5).joinToString { "${it.key}->'${it.value}'" }
+        Log.i(TAG, "Sample vocab entries: $samples")
+
         // ── Load tokenizer_config.json ──────────────────────────────────
         val configText = File(configJsonPath).readText(Charsets.UTF_8)
         val configObj = JSONObject(configText)
 
-        bosTokenId = configObj.optInt("bos_token_id", 2)
-        eosTokenId = configObj.optInt("eos_token_id", 1)
-        padTokenId = configObj.optInt("pad_token_id", 0)
+        bosTokenId = configObj.optInt("bos_token_id", DEFAULT_BOS)
+        eosTokenId = configObj.optInt("eos_token_id", DEFAULT_EOS)
+        padTokenId = configObj.optInt("pad_token_id", DEFAULT_PAD)
 
         // Resolve special tokens for Gemma chat template
         startOfTurnId = configObj.optInt("start_of_turn_id",
@@ -74,27 +97,34 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
         endOfTurnId = configObj.optInt("end_of_turn_id",
             tok2id["<end_of_turn>"] ?: DEFAULT_END_OF_TURN)
 
-        Log.i(TAG, "Vocab loaded: size=$vocabSize, bos=$bosTokenId, eos=$eosTokenId, " +
-                "startTurn=$startOfTurnId, endTurn=$endOfTurnId, maxTokenLen=$maxTokenLen")
+        Log.i(TAG, "Config: bos=$bosTokenId, eos=$eosTokenId, pad=$padTokenId, " +
+                "startTurn=$startOfTurnId, endTurn=$endOfTurnId")
+        Log.i(TAG, "BOS='${id2tok[bosTokenId]}', EOS='${id2tok[eosTokenId]}', " +
+                "startTurn='${id2tok[startOfTurnId]}', endTurn='${id2tok[endOfTurnId]}'")
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Core text→IDs encoding (no special tokens)
+    //  Core text→IDs encoding (SentencePiece-style)
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * Encode raw text into token IDs using greedy longest-prefix matching.
-     * Does NOT add BOS/EOS or any special tokens.
+     * SentencePiece preprocessing: replace every space with ▁ and
+     * prepend ▁ to the beginning. Then greedy longest-prefix match.
+     *
+     * "Hello world" → "▁Hello▁world"
+     * "user\nHi"    → "▁user\nHi"     (newlines are NOT replaced)
      */
     private fun encodeToIds(text: String): MutableList<Int> {
+        // SentencePiece normalization: ▁ replaces spaces, prepend ▁
+        val normalized = "\u2581" + text.replace(" ", "\u2581")
         val ids = mutableListOf<Int>()
         var i = 0
-        while (i < text.length) {
+        while (i < normalized.length) {
             var matched = false
-            // Try longest prefix first
-            val end = minOf(i + maxTokenLen, text.length)
+            val end = minOf(i + maxTokenLen, normalized.length)
+            // Try longest match first
             for (len in (end - i) downTo 1) {
-                val sub = text.substring(i, i + len)
+                val sub = normalized.substring(i, i + len)
                 val id = token2id[sub]
                 if (id != null) {
                     ids.add(id)
@@ -104,19 +134,18 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
                 }
             }
             if (!matched) {
-                // Character-level fallback: try single char
-                val ch = text.substring(i, i + 1)
+                // Single char lookup
+                val ch = normalized.substring(i, i + 1)
                 val id = token2id[ch]
                 if (id != null) {
                     ids.add(id)
                 } else {
-                    // For SentencePiece, the '▁' prefix is common
-                    val withPrefix = "▁$ch"
-                    val prefixId = token2id[withPrefix]
-                    if (prefixId != null) {
-                        ids.add(prefixId)
+                    // Byte fallback: <0xNN> for each UTF-8 byte
+                    for (b in ch.toByteArray(Charsets.UTF_8)) {
+                        val hex = String.format("<0x%02X>", b.toInt() and 0xFF)
+                        val byteId = token2id[hex]
+                        if (byteId != null) ids.add(byteId)
                     }
-                    // else: truly unknown, skip
                 }
                 i += 1
             }
@@ -128,11 +157,6 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
     //  Public API
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * Encode text → list of token IDs.
-     * Uses greedy longest-prefix matching (character-level fallback).
-     * Prepends BOS token.
-     */
     fun encode(text: String, addBos: Boolean = true): LongArray {
         val ids = mutableListOf<Int>()
         if (addBos) ids.add(bosTokenId)
@@ -141,22 +165,15 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
     }
 
     /**
-     * Format a user message + optional RAG context using the Gemma chat template:
-     *
+     * Format with Gemma chat template:
      *   <bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n
-     *
-     * Returns token IDs ready for the model's forward() method.
      */
     fun formatGemmaChat(userText: String, context: String? = null): LongArray {
         val ids = mutableListOf<Int>()
 
-        // <bos>
         ids.add(bosTokenId)
-
-        // <start_of_turn>
         ids.add(startOfTurnId)
 
-        // "user\n" + content
         val userContent = if (!context.isNullOrBlank()) {
             "user\nContext:\n$context\n\nQuestion: $userText\nAnswer based on the context above."
         } else {
@@ -164,37 +181,29 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
         }
         ids.addAll(encodeToIds(userContent))
 
-        // <end_of_turn>
         ids.add(endOfTurnId)
-
-        // newline between turns
-        val nlIds = encodeToIds("\n")
-        ids.addAll(nlIds)
-
-        // <start_of_turn>model\n
+        ids.addAll(encodeToIds("\n"))
         ids.add(startOfTurnId)
         ids.addAll(encodeToIds("model\n"))
 
-        Log.d(TAG, "Chat formatted: ${ids.size} tokens")
+        Log.i(TAG, "Chat formatted: ${ids.size} tokens, first 20 IDs: ${ids.take(20)}")
+        // Log the text representation of first tokens for verification
+        val firstTokenTexts = ids.take(20).map { id -> "${id}='${id2token[id] ?: "?"}'" }
+        Log.i(TAG, "Token text: $firstTokenTexts")
         return ids.map { it.toLong() }.toLongArray()
     }
 
-    /**
-     * Decode token IDs → text string.
-     * Strips SentencePiece '▁' prefix markers and replaces with spaces.
-     */
     fun decode(ids: List<Int>): String {
         val sb = StringBuilder()
         for (id in ids) {
             if (id == bosTokenId || id == padTokenId) continue
             if (id == eosTokenId || id == endOfTurnId) break
-            if (id == startOfTurnId) continue  // skip special tokens in output
+            if (id == startOfTurnId) continue
             val token = id2token[id] ?: ""
             sb.append(token)
         }
-        // SentencePiece uses '▁' (U+2581) as word boundary
         return sb.toString()
-            .replace("▁", " ")
+            .replace("\u2581", " ")
             .trimStart()
     }
 }

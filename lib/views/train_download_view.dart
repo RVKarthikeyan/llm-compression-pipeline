@@ -267,7 +267,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
       final files = dir.listSync().whereType<File>();
       for (final f in files) {
         final name = f.path.split(Platform.pathSeparator).last.toLowerCase();
-        if (name.endsWith('_vocab.json') || name == 'vocab.json') {
+        if (name == 'tokenizer.json' ||
+            name.endsWith('_vocab.json') ||
+            name == 'vocab.json') {
           vocabPath = f.path;
         }
         if (name.endsWith('_tokenizer_config.json') ||

@@ -6,199 +6,431 @@ import io.flutter.plugin.common.MethodChannel
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import org.json.JSONObject
+import org.pytorch.executorch.extension.llm.LlmCallback
+import org.pytorch.executorch.extension.llm.LlmGenerationConfig
+import org.pytorch.executorch.extension.llm.LlmModule
+import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * ExecuTorch inference via MethodChannel.
+ * ExecuTorch inference via LlmModule high-level API.
  *
- * The .pte model produced by the Colab notebook takes:
- *   input_ids     : Tensor<long> [1, seq_len]
- *   attention_mask : Tensor<long> [1, seq_len]
- * and returns:
- *   logits        : Tensor<float32> [1, seq_len, vocab_size]
+ * LlmModule handles tokenization, KV-cache, and sampling internally.
+ * We only need to:
+ *   1. Pass the model + tokenizer file paths
+ *   2. Format the prompt with the correct chat template
+ *   3. Call generate() and collect streamed tokens
  *
- * We tokenize text → long[], run forward(), sample from logits, and decode back.
- * Everything runs on a background thread to avoid blocking the UI.
+ * Supports Llama 3 and Gemma chat templates (auto-detected from
+ * tokenizer_config.json).
  */
 class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "ExecuTorch"
         private const val CHANNEL = "com.example.my_ai/executorch"
-        private const val MAX_NEW_TOKENS = 150
-        private const val TEMPERATURE = 0.7f
-        private const val TOP_K = 40
+        private const val MAX_NEW_TOKENS = 512
+        private const val SEQ_LEN = 2048
+        private const val TEMPERATURE = 0.0f
+
+        /** Special tokens to strip from final output. */
+        private val SPECIAL_TOKENS = listOf(
+            "<|begin_of_text|>", "<|end_of_text|>",
+            "<|start_header_id|>", "<|end_header_id|>",
+            "<|eot_id|>", "<|finetune_right_pad_id|>",
+            "<bos>", "<eos>",
+            "<start_of_turn>", "<end_of_turn>",
+        )
     }
 
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var flutterChannel: MethodChannel? = null
 
-    // Native ExecuTorch module (org.pytorch.executorch.Module)
-    private var module: Any? = null
-    private var tokenizer: SimpleTokenizer? = null
-    private var isNativeLoaded = false
+    private var llmModule: LlmModule? = null
+    private var isLoaded = false
+    @Volatile private var stopRequested = false
 
-    // Reflection caches (resolved once after model load)
-    private var tensorClass: Class<*>? = null
-    private var evalueClass: Class<*>? = null
-    private var fromTensorMethod: java.lang.reflect.Method? = null
-    private var forwardMethod: java.lang.reflect.Method? = null
-    private var toTensorMethod: java.lang.reflect.Method? = null
-    private var getDataAsFloatArrayMethod: java.lang.reflect.Method? = null
-    private var tensorFromBlobLongMethod: java.lang.reflect.Method? = null
+    // "llama3" or "gemma" — detected from tokenizer_config.json
+    private var chatTemplateType = "llama3"
+
+    private fun log(msg: String) {
+        Log.i(TAG, msg)
+        mainHandler.post {
+            try { flutterChannel?.invokeMethod("log", msg) } catch (_: Exception) {}
+        }
+    }
+
+    private fun logError(msg: String, e: Throwable? = null) {
+        Log.e(TAG, msg, e)
+        mainHandler.post {
+            try { flutterChannel?.invokeMethod("log", "ERROR: $msg") } catch (_: Exception) {}
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "loadModel" -> {
-                        val path = call.argument<String>("path")
-                        val vocabPath = call.argument<String>("vocabPath")
-                        val configPath = call.argument<String>("configPath")
-                        if (path == null) {
-                            result.error("INVALID_ARG", "Model path is null", null)
-                            return@setMethodCallHandler
-                        }
-                        handleLoadModel(path, vocabPath, configPath, result)
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        flutterChannel = channel
+
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "loadModel" -> {
+                    val modelPath = call.argument<String>("path")
+                    val tokenizerPath = call.argument<String>("vocabPath")
+                        ?: call.argument<String>("tokenizerPath")
+                    val configPath = call.argument<String>("configPath")
+                    if (modelPath == null) {
+                        result.error("INVALID_ARG", "Model path is null", null)
+                        return@setMethodCallHandler
                     }
-                    "runInference" -> {
-                        val prompt = call.argument<String>("prompt")
-                        val context = call.argument<String>("context")
-                        if (prompt.isNullOrEmpty()) {
-                            result.error("EMPTY_INPUT", "Prompt is empty", null)
-                            return@setMethodCallHandler
-                        }
-                        handleRunInference(prompt, context, result)
+                    if (tokenizerPath == null) {
+                        result.error("INVALID_ARG", "Tokenizer path is null", null)
+                        return@setMethodCallHandler
                     }
-                    else -> result.notImplemented()
+                    handleLoadModel(modelPath, tokenizerPath, configPath, result)
                 }
+                "runInference" -> {
+                    val prompt = call.argument<String>("prompt")
+                    val context = call.argument<String>("context")
+                    if (prompt.isNullOrEmpty()) {
+                        result.error("EMPTY_INPUT", "Prompt is empty", null)
+                        return@setMethodCallHandler
+                    }
+                    handleRunInference(prompt, context, result)
+                }
+                "resetCache" -> {
+                    try {
+                        llmModule?.resetNative()
+                        log("Cache/context reset OK")
+                    } catch (e: Exception) {
+                        log("Reset failed: ${e.message}")
+                    }
+                    result.success("reset_ok")
+                }
+                "stop" -> {
+                    stopRequested = true
+                    try { llmModule?.stop() } catch (_: Exception) {}
+                    result.success("stop_ok")
+                }
+                else -> result.notImplemented()
             }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // NATIVE LIBRARY INITIALIZATION
+    //  MODEL LOADING
     // ═══════════════════════════════════════════════════════════════════════
 
-    private var nativeLibInitialized = false
+    private var soLoaderInitialized = false
 
-    /**
-     * Initialize native libraries (SoLoader + ExecuTorch JNI).
-     * Must be called BEFORE any ExecuTorch class is touched.
-     */
-    private fun ensureNativeLibsLoaded() {
-        if (nativeLibInitialized) return
-
-        // Try SoLoader first (handles transitive .so dependencies)
+    private fun initSoLoader() {
+        if (soLoaderInitialized) return
         try {
             val soLoaderClass = Class.forName("com.facebook.soloader.SoLoader")
             val initMethod = soLoaderClass.getMethod(
                 "init", android.content.Context::class.java, Boolean::class.javaPrimitiveType
             )
             initMethod.invoke(null, this@MainActivity, false)
-            Log.i(TAG, "SoLoader initialized successfully")
-            nativeLibInitialized = true
+            log("SoLoader initialized OK")
+            soLoaderInitialized = true
         } catch (e: Exception) {
-            Log.w(TAG, "SoLoader init failed: ${e.message}, trying System.loadLibrary")
+            log("SoLoader init: ${e.message} (may not be needed)")
+        }
+    }
+
+    private fun handleLoadModel(
+        modelPath: String,
+        tokenizerPath: String,
+        configPath: String?,
+        result: MethodChannel.Result
+    ) {
+        executor.execute {
+            try {
+                log("=== LOADING MODEL ===")
+                log("Model: $modelPath")
+                log("Tokenizer: $tokenizerPath")
+                log("Config: $configPath")
+
+                // Validate tokenizer format before passing to LlmModule
+                if (!validateTokenizerFile(tokenizerPath)) {
+                    val name = File(tokenizerPath).name
+                    logError("Unsupported tokenizer format: $name")
+                    mainHandler.post {
+                        result.success("demo: Unsupported tokenizer format '$name'. " +
+                            "LlmModule requires tokenizer.json, tokenizer.bin, or tokenizer.model. " +
+                            "A custom vocab.json is not compatible.")
+                    }
+                    return@execute
+                }
+
+                // Clean up previous
+                try { llmModule?.resetNative() } catch (_: Exception) {}
+                llmModule = null
+                isLoaded = false
+                System.gc()
+
+                // Detect chat template
+                chatTemplateType = detectChatTemplate(configPath)
+                log("Chat template: $chatTemplateType")
+
+                // Log memory
+                val runtime = Runtime.getRuntime()
+                val freeMemMB = (runtime.freeMemory() + runtime.maxMemory() - runtime.totalMemory()) / (1024 * 1024)
+                log("Java heap free: ${freeMemMB}MB")
+                val am = getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val memInfo = android.app.ActivityManager.MemoryInfo()
+                am.getMemoryInfo(memInfo)
+                log("System: avail=${memInfo.availMem / (1024*1024)}MB, lowMemory=${memInfo.lowMemory}")
+
+                // Initialize SoLoader
+                initSoLoader()
+
+                // Create LlmModule
+                log("Creating LlmModule...")
+                llmModule = LlmModule(
+                    LlmModule.MODEL_TYPE_TEXT,
+                    modelPath,
+                    tokenizerPath,
+                    TEMPERATURE
+                )
+
+                // Load model weights
+                log("Loading model weights...")
+                val t0 = System.currentTimeMillis()
+                val loadResult = llmModule!!.load()
+                val elapsed = System.currentTimeMillis() - t0
+                log("Model loaded in ${elapsed}ms (result=$loadResult)")
+
+                isLoaded = true
+                log("=== MODEL READY ===")
+                mainHandler.post { result.success("native_loaded") }
+
+            } catch (e: Exception) {
+                val root = findRootCause(e)
+                logError("Load failed: ${root.javaClass.simpleName}: ${root.message}", e)
+                isLoaded = false
+                mainHandler.post {
+                    result.success("demo: load failed - ${root.message}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Detect chat template from tokenizer_config.json.
+     * Returns "llama3" or "gemma".
+     */
+    private fun detectChatTemplate(configPath: String?): String {
+        if (configPath == null) return "llama3"
+        try {
+            val json = JSONObject(File(configPath).readText(Charsets.UTF_8))
+            val template = json.optString("chat_template", "")
+            return when {
+                template.contains("start_header_id") -> "llama3"
+                template.contains("start_of_turn") -> "gemma"
+                else -> "llama3"
+            }
+        } catch (e: Exception) {
+            log("Could not read config: ${e.message}")
+            return "llama3"
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  INFERENCE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun handleRunInference(
+        prompt: String,
+        context: String?,
+        result: MethodChannel.Result
+    ) {
+        if (!isLoaded || llmModule == null) {
+            result.error("NOT_LOADED", "Model not loaded", null)
+            return
         }
 
-        // Fallback: try direct System.loadLibrary
-        if (!nativeLibInitialized) {
+        executor.execute {
             try {
-                System.loadLibrary("executorch_jni")
-                Log.i(TAG, "System.loadLibrary(executorch_jni) succeeded")
-                nativeLibInitialized = true
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "System.loadLibrary failed: ${e.message}")
-                // Try alternate library names
-                try {
-                    System.loadLibrary("executorch")
-                    Log.i(TAG, "System.loadLibrary(executorch) succeeded")
-                    nativeLibInitialized = true
-                } catch (e2: UnsatisfiedLinkError) {
-                    Log.e(TAG, "All native library loading failed: ${e2.message}")
+                stopRequested = false
+                log("=== INFERENCE START === prompt: \"${prompt.take(80)}\"")
+
+                val formattedPrompt = formatChatPrompt(prompt, context)
+                log("Formatted prompt: ${formattedPrompt.length} chars, template=$chatTemplateType")
+
+                val genConfig = LlmGenerationConfig.create()
+                    .maxNewTokens(MAX_NEW_TOKENS)
+                    .seqLen(SEQ_LEN)
+                    .temperature(TEMPERATURE)
+                    .echo(false)
+                    .build()
+
+                val outputBuilder = StringBuilder()
+                val t0 = System.currentTimeMillis()
+                var tokenCount = 0
+
+                val callback = object : LlmCallback {
+                    override fun onResult(token: String) {
+                        if (!stopRequested) {
+                            outputBuilder.append(token)
+                            tokenCount++
+                            if (tokenCount <= 5 || tokenCount % 20 == 0) {
+                                log("Token $tokenCount: \"${token.replace("\n", "\\n")}\"")
+                            }
+                        }
+                    }
+
+                    override fun onStats(stats: String?) {
+                        log("Stats: $stats")
+                    }
+                }
+
+                log("Calling generate()...")
+                llmModule!!.generate(formattedPrompt, genConfig, callback)
+
+                val elapsed = System.currentTimeMillis() - t0
+                var output = outputBuilder.toString().trim()
+
+                // Strip any special tokens that leaked through
+                output = stripSpecialTokens(output)
+
+                // Prepend the seed phrase if we used context (echo=false strips it)
+                if (!context.isNullOrBlank() && output.isNotEmpty()) {
+                    output = "Based on the text provided, $output"
+                }
+
+                log("Generated $tokenCount tokens, ${output.length} chars in ${elapsed}ms")
+                if (elapsed > 0 && tokenCount > 0) {
+                    log("Speed: ${String.format("%.2f", tokenCount * 1000.0 / elapsed)} tok/s")
+                }
+                log("Output: \"${output.take(300)}\"")
+
+                mainHandler.post { result.success(output) }
+
+            } catch (e: Exception) {
+                val root = findRootCause(e)
+                logError("Inference failed: ${root.javaClass.simpleName}: ${root.message}", e)
+                mainHandler.post {
+                    result.error("INFERENCE_ERROR", root.message, null)
                 }
             }
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // MODEL LOADING
+    //  CHAT TEMPLATE FORMATTING
     // ═══════════════════════════════════════════════════════════════════════
 
-    private fun handleLoadModel(
-        modelPath: String,
-        vocabPath: String?,
-        configPath: String?,
-        result: MethodChannel.Result
-    ) {
-        executor.execute {
-            try {
-                Log.i(TAG, "Loading model: $modelPath")
-                Log.i(TAG, "Vocab path: $vocabPath")
-                Log.i(TAG, "Config path: $configPath")
-
-                // 0. Initialize native libraries FIRST
-                ensureNativeLibsLoaded()
-
-                // 1. Load tokenizer (if vocab files provided)
-                if (vocabPath != null && configPath != null) {
-                    try {
-                        tokenizer = SimpleTokenizer(vocabPath, configPath)
-                        Log.i(TAG, "Tokenizer loaded: vocab=${tokenizer!!.vocabSize}, " +
-                                "bos=${tokenizer!!.bosTokenId}, eos=${tokenizer!!.eosTokenId}, " +
-                                "startTurn=${tokenizer!!.startOfTurnId}, endTurn=${tokenizer!!.endOfTurnId}")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Tokenizer load failed: ${e.message}", e)
-                        tokenizer = null
-                    }
-                }
-
-                // 2. Load ExecuTorch Module via reflection (for graceful fallback)
-                val moduleClass = Class.forName("org.pytorch.executorch.Module")
-                Log.i(TAG, "Module class found: ${moduleClass.name}")
-
-                // Try load(String) first, then load(String, int)
-                val loadMethod = try {
-                    moduleClass.getMethod("load", String::class.java)
-                } catch (e: NoSuchMethodException) {
-                    Log.w(TAG, "Module.load(String) not found, trying load(String, int)")
-                    moduleClass.getMethod("load", String::class.java, Int::class.javaPrimitiveType)
-                }
-                Log.i(TAG, "Load method found: ${loadMethod.name}(${loadMethod.parameterTypes.joinToString { it.name }})")
-
-                module = if (loadMethod.parameterCount == 1) {
-                    loadMethod.invoke(null, modelPath)
-                } else {
-                    loadMethod.invoke(null, modelPath, 0) // 0 = MMAP mode
-                }
-                Log.i(TAG, "Module loaded successfully: ${module!!.javaClass.name}")
-
-                // 3. Resolve reflection handles for Tensor/EValue
-                resolveReflection()
-
-                isNativeLoaded = true
-
-                val status = if (tokenizer != null) "native_loaded" else "native_loaded_no_tokenizer"
-                mainHandler.post { result.success(status) }
-
-            } catch (e: ClassNotFoundException) {
-                Log.e(TAG, "ExecuTorch classes not found: ${e.message}", e)
-                isNativeLoaded = false
-                mainHandler.post { result.success("demo: ExecuTorch classes not found - ${e.message}") }
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Native lib missing: ${e.message}", e)
-                isNativeLoaded = false
-                mainHandler.post { result.success("demo: native lib not loaded - ${e.message}") }
-            } catch (e: Exception) {
-                val rootCause = findRootCause(e)
-                val msg = "${rootCause.javaClass.simpleName}: ${rootCause.message}"
-                Log.e(TAG, "Load error: $msg", e)
-                // Still try to enter demo mode instead of hard failing
-                isNativeLoaded = false
-                mainHandler.post { result.success("demo: $msg") }
-            }
+    private fun formatChatPrompt(userText: String, context: String?): String {
+        return when (chatTemplateType) {
+            "llama3" -> formatLlama3(userText, context)
+            "gemma" -> formatGemma(userText, context)
+            else -> formatLlama3(userText, context)
         }
+    }
+
+    private fun formatLlama3(userText: String, context: String?): String {
+        val sb = StringBuilder()
+        sb.append("<|begin_of_text|>")
+
+        // System message — extractive reading comprehension framing
+        sb.append("<|start_header_id|>system<|end_header_id|>\n\n")
+        if (!context.isNullOrBlank()) {
+            sb.append("You are a reading comprehension assistant. ")
+            sb.append("Read the text carefully and answer questions using ONLY information explicitly written in the text. ")
+            sb.append("Do NOT use your own knowledge. Do NOT guess. Do NOT infer diagnoses or facts not stated in the text. ")
+            sb.append("If the text says a value is Normal, report it as Normal. If the text says a value is High, report it as High. ")
+            sb.append("Only mention diagnoses that are explicitly listed in the text.")
+        } else {
+            sb.append("You are a helpful assistant. Provide a detailed and complete answer.")
+        }
+        sb.append("<|eot_id|>")
+
+        // User message
+        sb.append("<|start_header_id|>user<|end_header_id|>\n\n")
+        if (!context.isNullOrBlank()) {
+            sb.append("Read the following text and answer the question.\n\n")
+            sb.append("TEXT:\n")
+            sb.append(context)
+            sb.append("\n\nQUESTION: ")
+            sb.append(userText)
+        } else {
+            sb.append(userText)
+        }
+        sb.append("<|eot_id|>")
+
+        // Assistant turn — seed with grounding phrase to force extractive behavior
+        sb.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+        if (!context.isNullOrBlank()) {
+            sb.append("Based on the text provided, ")
+        }
+        return sb.toString()
+    }
+
+    private fun formatGemma(userText: String, context: String?): String {
+        val sb = StringBuilder()
+        sb.append("<bos><start_of_turn>user\n")
+        if (!context.isNullOrBlank()) {
+            sb.append("You are a reading comprehension assistant. ")
+            sb.append("Answer using ONLY information explicitly written in the text. ")
+            sb.append("Do NOT use your own knowledge or guess.\n\n")
+            sb.append("TEXT:\n")
+            sb.append(context)
+            sb.append("\n\nQUESTION: ")
+            sb.append(userText)
+        } else {
+            sb.append(userText)
+        }
+        sb.append("<end_of_turn>\n<start_of_turn>model\n")
+        if (!context.isNullOrBlank()) {
+            sb.append("Based on the text provided, ")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Remove all known special tokens from model output.
+     */
+    private fun stripSpecialTokens(text: String): String {
+        var result = text
+        for (token in SPECIAL_TOKENS) {
+            result = result.replace(token, "")
+        }
+        // Also strip "user", "assistant", "model" that appear as role markers
+        // right after header tokens, but only if at start of output
+        result = result
+            .trimStart()
+            .removePrefix("user")
+            .removePrefix("assistant")
+            .removePrefix("model")
+            .trim()
+        return result
+    }
+
+    /**
+     * Validate tokenizer file format. LlmModule supports:
+     * - tokenizer.json (HuggingFace format)
+     * - tokenizer.bin (SentencePiece binary)
+     * - tokenizer.model (SentencePiece model)
+     * It does NOT support custom vocab.json format.
+     */
+    private fun validateTokenizerFile(path: String): Boolean {
+        val name = File(path).name.lowercase()
+        // Known good formats
+        if (name == "tokenizer.json" || name == "tokenizer.bin" || name == "tokenizer.model") {
+            return true
+        }
+        // Check if the file content looks like a HuggingFace tokenizer
+        try {
+            val head = File(path).bufferedReader().use { it.readLine() ?: "" }
+            if (head.contains("\"model\"") || head.contains("\"version\"") || head.contains("\"vocab\"")) {
+                // Looks like a HuggingFace tokenizer.json content — allow it
+                return true
+            }
+        } catch (_: Exception) {}
+        return false
     }
 
     private fun findRootCause(e: Throwable): Throwable {
@@ -207,215 +439,5 @@ class MainActivity : FlutterActivity() {
             cause = cause.cause!!
         }
         return cause
-    }
-
-    /**
-     * Resolve all reflection Method handles once, so forward() calls are fast.
-     */
-    private fun resolveReflection() {
-        // org.pytorch.executorch.Tensor
-        tensorClass = Class.forName("org.pytorch.executorch.Tensor")
-        Log.i(TAG, "Tensor class found. Methods: ${tensorClass!!.methods.map { it.name }.distinct().sorted()}")
-
-        // Tensor.fromBlob(long[] data, long[] shape) — NOTE: method is "fromBlob", NOT "fromBlobLong"
-        tensorFromBlobLongMethod = try {
-            tensorClass!!.getMethod("fromBlob", LongArray::class.java, LongArray::class.java)
-        } catch (e: NoSuchMethodException) {
-            Log.w(TAG, "Tensor.fromBlob(long[], long[]) not found, trying fromBlobLong")
-            tensorClass!!.getMethod("fromBlobLong", LongArray::class.java, LongArray::class.java)
-        }
-        Log.i(TAG, "Tensor create method: ${tensorFromBlobLongMethod!!.name}")
-
-        // tensor.getDataAsFloatArray()
-        getDataAsFloatArrayMethod = try {
-            tensorClass!!.getMethod("getDataAsFloatArray")
-        } catch (e: NoSuchMethodException) {
-            Log.w(TAG, "getDataAsFloatArray not found, trying dataAsFloatArray")
-            tensorClass!!.getMethod("dataAsFloatArray")
-        }
-        Log.i(TAG, "Float data method: ${getDataAsFloatArrayMethod!!.name}")
-
-        // org.pytorch.executorch.EValue
-        evalueClass = Class.forName("org.pytorch.executorch.EValue")
-        Log.i(TAG, "EValue class found. Methods: ${evalueClass!!.methods.map { it.name }.distinct().sorted()}")
-
-        // EValue.from(Tensor t)
-        fromTensorMethod = evalueClass!!.getMethod("from", tensorClass)
-        // evalue.toTensor()
-        toTensorMethod = evalueClass!!.getMethod("toTensor")
-
-        // Module.forward(EValue[])
-        val moduleClass = module!!.javaClass
-        val evalueArrayType = java.lang.reflect.Array.newInstance(evalueClass!!, 0).javaClass
-
-        forwardMethod = try {
-            moduleClass.getMethod("forward", evalueArrayType)
-        } catch (e: NoSuchMethodException) {
-            // Some versions use execute("forward", EValue[])
-            Log.w(TAG, "Module.forward(EValue[]) not found, trying execute(String, EValue[])")
-            try {
-                moduleClass.getMethod("execute", String::class.java, evalueArrayType)
-            } catch (e2: NoSuchMethodException) {
-                Log.e(TAG, "Available methods on Module: ${moduleClass.methods.map { "${it.name}(${it.parameterTypes.joinToString { t -> t.simpleName }})" }}")
-                throw e2
-            }
-        }
-        Log.i(TAG, "Forward method: ${forwardMethod!!.name}(${forwardMethod!!.parameterTypes.joinToString { it.simpleName }})")
-
-        Log.i(TAG, "Reflection resolved successfully")
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // INFERENCE — autoregressive generation with tensor I/O
-    // ═══════════════════════════════════════════════════════════════════════
-
-    private fun handleRunInference(
-        prompt: String,
-        context: String?,
-        result: MethodChannel.Result
-    ) {
-        if (!isNativeLoaded) {
-            result.error("DEMO_MODE", "Native ExecuTorch not loaded", null)
-            return
-        }
-        if (tokenizer == null) {
-            result.error("NO_TOKENIZER",
-                "Tokenizer not loaded. Please load vocab.json alongside the model.", null)
-            return
-        }
-
-        executor.execute {
-            try {
-                val response = autoregressiveGenerate(prompt, context, MAX_NEW_TOKENS)
-                mainHandler.post { result.success(response) }
-            } catch (e: Exception) {
-                val rootCause = findRootCause(e)
-                val msg = "${rootCause.javaClass.simpleName}: ${rootCause.message}"
-                Log.e(TAG, "Inference error: $msg", e)
-                mainHandler.post { result.error("INFERENCE_ERROR", msg, null) }
-            }
-        }
-    }
-
-    /**
-     * Full autoregressive decoding loop using Gemma chat template:
-     *   <bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n
-     * Then generate tokens until EOS or max length.
-     */
-    private fun autoregressiveGenerate(
-        prompt: String,
-        context: String?,
-        maxTokens: Int
-    ): String {
-        val tok = tokenizer!!
-
-        // Format with Gemma chat template
-        val inputIds = tok.formatGemmaChat(prompt, context).toMutableList()
-        val generatedIds = mutableListOf<Int>()
-
-        Log.i(TAG, "Generating: prompt_tokens=${inputIds.size}, max_new=$maxTokens")
-        val t0 = System.currentTimeMillis()
-
-        for (step in 0 until maxTokens) {
-            val seqLen = inputIds.size
-            val idsArray = inputIds.toLongArray()
-            val maskArray = LongArray(seqLen) { 1L }
-
-            // Create Tensor objects via reflection
-            val shape = longArrayOf(1L, seqLen.toLong())
-            val idsTensor = tensorFromBlobLongMethod!!.invoke(null, idsArray, shape)
-            val maskTensor = tensorFromBlobLongMethod!!.invoke(null, maskArray, shape)
-
-            // Wrap in EValue
-            val idsEValue = fromTensorMethod!!.invoke(null, idsTensor)
-            val maskEValue = fromTensorMethod!!.invoke(null, maskTensor)
-
-            // Build EValue[] array
-            val evalueArray = java.lang.reflect.Array.newInstance(evalueClass!!, 2)
-            java.lang.reflect.Array.set(evalueArray, 0, idsEValue)
-            java.lang.reflect.Array.set(evalueArray, 1, maskEValue)
-
-            // module.forward(EValue[]) → EValue[]
-            // Cast to Object to prevent Java varargs spreading the array
-            val outputs = if (forwardMethod!!.name == "execute") {
-                forwardMethod!!.invoke(module, "forward", evalueArray)
-            } else {
-                forwardMethod!!.invoke(module, evalueArray as Any)
-            }
-
-            // Get first output → Tensor → float[]
-            val firstEValue = java.lang.reflect.Array.get(outputs, 0)
-            val logitsTensor = toTensorMethod!!.invoke(firstEValue)
-            val logitsFlat = getDataAsFloatArrayMethod!!.invoke(logitsTensor) as FloatArray
-
-            // logitsFlat is [1, seq_len, vocab_size] flattened
-            // We want the last position's logits: offset = (seq_len - 1) * vocab_size
-            val vocabSize = tok.vocabSize
-            val lastOffset = (seqLen - 1) * vocabSize
-            val lastLogits = FloatArray(vocabSize)
-            System.arraycopy(logitsFlat, lastOffset, lastLogits, 0, vocabSize)
-
-            // Sample next token
-            val nextTokenId = sampleToken(lastLogits)
-
-            // Check for EOS or end_of_turn
-            if (nextTokenId == tok.eosTokenId || nextTokenId == tok.endOfTurnId) {
-                Log.i(TAG, "Stop token at step $step (id=$nextTokenId)")
-                break
-            }
-
-            generatedIds.add(nextTokenId)
-            inputIds.add(nextTokenId.toLong())
-
-            // Log progress every 10 tokens
-            if (step % 10 == 0 && step > 0) {
-                val elapsed = System.currentTimeMillis() - t0
-                val tokPerSec = if (elapsed > 0) step * 1000.0 / elapsed else 0.0
-                Log.d(TAG, "Step $step: ${String.format("%.1f", tokPerSec)} tok/s")
-            }
-        }
-
-        val elapsed = System.currentTimeMillis() - t0
-        val tokPerSec = if (elapsed > 0) generatedIds.size * 1000.0 / elapsed else 0.0
-        Log.i(TAG, "Generated ${generatedIds.size} tokens in ${elapsed}ms (${String.format("%.1f", tokPerSec)} tok/s)")
-
-        return tok.decode(generatedIds)
-    }
-
-    /**
-     * Temperature-scaled top-k sampling.
-     * temperature=0 → greedy argmax.
-     */
-    private fun sampleToken(logits: FloatArray): Int {
-        if (TEMPERATURE <= 0f) {
-            // Greedy
-            return logits.indices.maxByOrNull { logits[it] } ?: 0
-        }
-
-        // Apply temperature
-        val scaled = FloatArray(logits.size) { logits[it] / TEMPERATURE }
-
-        // Top-k filtering
-        val k = minOf(TOP_K, scaled.size)
-        data class IdxVal(val idx: Int, val value: Float)
-
-        val topK = scaled.mapIndexed { i, v -> IdxVal(i, v) }
-            .sortedByDescending { it.value }
-            .take(k)
-
-        // Softmax over top-k
-        val maxVal = topK.first().value
-        val exps = topK.map { Math.exp((it.value - maxVal).toDouble()).toFloat() }
-        val sumExps = exps.sum()
-        val probs = exps.map { it / sumExps }
-
-        // Sample
-        val r = Math.random().toFloat()
-        var cumulative = 0f
-        for (i in probs.indices) {
-            cumulative += probs[i]
-            if (r < cumulative) return topK[i].idx
-        }
-        return topK.last().idx
     }
 }

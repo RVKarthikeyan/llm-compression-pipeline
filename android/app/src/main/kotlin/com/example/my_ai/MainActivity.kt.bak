@@ -1,0 +1,566 @@
+package com.example.my_ai
+
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import java.util.concurrent.Executors
+
+/**
+ * ExecuTorch inference via MethodChannel.
+ *
+ * The .pte model was exported via mixed_precision_quantization_executorch
+ * with use_cache=False. It has NO internal KV-cache. Each forward() call
+ * processes the FULL sequence from scratch:
+ *
+ *   input_ids      : Tensor<long> [1, seq_len]
+ *   attention_mask : Tensor<long> [1, seq_len]   (all 1s)
+ *
+ * Returns:
+ *   logits : Tensor<float32> [1, seq_len, vocab_size]
+ *
+ * We sample from logits[:, -1, :] (the last position).
+ * Matches run_inference_mixed_precision.py exactly.
+ */
+class MainActivity : FlutterActivity() {
+    companion object {
+        private const val TAG = "ExecuTorch"
+        private const val CHANNEL = "com.example.my_ai/executorch"
+        private const val MAX_NEW_TOKENS = 32
+        private const val MAX_SEQ_LEN = 512
+        // Greedy decoding for reliability on quantized model
+        private const val TEMPERATURE = 0.0f
+        private const val TOP_K = 50
+        private const val LOAD_MODE_MMAP = 1
+    }
+
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var flutterChannel: MethodChannel? = null
+
+    // Native ExecuTorch module
+    private var module: Any? = null
+    private var tokenizer: SimpleTokenizer? = null
+    private var isNativeLoaded = false
+
+    // Reflection caches
+    private var tensorClass: Class<*>? = null
+    private var evalueClass: Class<*>? = null
+    private var fromTensorMethod: java.lang.reflect.Method? = null
+    private var forwardMethod: java.lang.reflect.Method? = null
+    private var toTensorMethod: java.lang.reflect.Method? = null
+    private var getDataAsFloatArrayMethod: java.lang.reflect.Method? = null
+    private var tensorFromBlobLongMethod: java.lang.reflect.Method? = null
+
+    /** Log to both Android logcat AND flutter console via debugPrint */
+    private fun log(msg: String) {
+        Log.i(TAG, msg)
+        // Send to Dart side so it appears in flutter run console
+        mainHandler.post {
+            try {
+                flutterChannel?.invokeMethod("log", msg)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun logError(msg: String, e: Throwable? = null) {
+        Log.e(TAG, msg, e)
+        mainHandler.post {
+            try {
+                flutterChannel?.invokeMethod("log", "ERROR: $msg")
+            } catch (_: Exception) {}
+        }
+    }
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        flutterChannel = channel
+
+        channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "loadModel" -> {
+                        val path = call.argument<String>("path")
+                        val vocabPath = call.argument<String>("vocabPath")
+                        val configPath = call.argument<String>("configPath")
+                        if (path == null) {
+                            result.error("INVALID_ARG", "Model path is null", null)
+                            return@setMethodCallHandler
+                        }
+                        handleLoadModel(path, vocabPath, configPath, result)
+                    }
+                    "runInference" -> {
+                        val prompt = call.argument<String>("prompt")
+                        val context = call.argument<String>("context")
+                        if (prompt.isNullOrEmpty()) {
+                            result.error("EMPTY_INPUT", "Prompt is empty", null)
+                            return@setMethodCallHandler
+                        }
+                        handleRunInference(prompt, context, result)
+                    }
+                    "resetCache" -> {
+                        // No KV-cache in this model — nothing to reset
+                        result.success("reset_ok")
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NATIVE LIBRARY INITIALIZATION
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private var nativeLibInitialized = false
+
+    private fun ensureNativeLibsLoaded() {
+        if (nativeLibInitialized) return
+
+        // Try SoLoader first
+        try {
+            val soLoaderClass = Class.forName("com.facebook.soloader.SoLoader")
+            val initMethod = soLoaderClass.getMethod(
+                "init", android.content.Context::class.java, Boolean::class.javaPrimitiveType
+            )
+            initMethod.invoke(null, this@MainActivity, false)
+            log("SoLoader initialized OK")
+            nativeLibInitialized = true
+        } catch (e: Exception) {
+            log("SoLoader init failed: ${e.message}")
+        }
+
+        if (!nativeLibInitialized) {
+            val libNames = listOf("executorch_jni", "executorch")
+            for (lib in libNames) {
+                try {
+                    System.loadLibrary(lib)
+                    log("System.loadLibrary($lib) OK")
+                    nativeLibInitialized = true
+                    break
+                } catch (e: UnsatisfiedLinkError) {
+                    log("System.loadLibrary($lib) failed: ${e.message}")
+                }
+            }
+        }
+
+        if (!nativeLibInitialized) {
+            logError("ALL native library loading methods failed!")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODEL LOADING
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun handleLoadModel(
+        modelPath: String,
+        vocabPath: String?,
+        configPath: String?,
+        result: MethodChannel.Result
+    ) {
+        executor.execute {
+            try {
+                log("=== LOADING MODEL ===")
+                log("Model: $modelPath")
+                log("Vocab: $vocabPath")
+                log("Config: $configPath")
+
+                ensureNativeLibsLoaded()
+
+                // 1. Load tokenizer
+                if (vocabPath != null && configPath != null) {
+                    try {
+                        tokenizer = SimpleTokenizer(vocabPath, configPath)
+                        log("Tokenizer loaded: vocab=${tokenizer!!.vocabSize}")
+                    } catch (e: Exception) {
+                        logError("Tokenizer load failed: ${e.message}", e)
+                        tokenizer = null
+                    }
+                } else {
+                    log("No tokenizer files provided")
+                }
+
+                // 2. Load ExecuTorch Module via reflection
+                val moduleClass = Class.forName("org.pytorch.executorch.Module")
+                log("Module class found: ${moduleClass.name}")
+
+                // Free memory before loading the model
+                log("Freeing memory before model load...")
+                System.gc()
+
+                // Log available memory
+                val runtime = Runtime.getRuntime()
+                val freeMemJava = (runtime.freeMemory() + runtime.maxMemory() - runtime.totalMemory()) / (1024 * 1024)
+                log("Java heap: free=${freeMemJava}MB, max=${runtime.maxMemory() / (1024 * 1024)}MB")
+                val activityManager = getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val memInfo = android.app.ActivityManager.MemoryInfo()
+                activityManager.getMemoryInfo(memInfo)
+                log("System: avail=${memInfo.availMem / (1024 * 1024)}MB, total=${memInfo.totalMem / (1024 * 1024)}MB, lowMemory=${memInfo.lowMemory}")
+
+                log("Loading model file (MMAP mode)...")
+                val t0 = System.currentTimeMillis()
+
+                // Prefer MMAP load mode to avoid copying entire model into RAM.
+                // MMAP lets the OS page model data in/out on demand.
+                val loadMethodTwoArg = try {
+                    moduleClass.getMethod("load", String::class.java, Int::class.javaPrimitiveType)
+                } catch (e: NoSuchMethodException) { null }
+                val loadMethodOneArg = try {
+                    moduleClass.getMethod("load", String::class.java)
+                } catch (e: NoSuchMethodException) { null }
+
+                module = when {
+                    loadMethodTwoArg != null -> {
+                        log("Using Module.load(path, MMAP=$LOAD_MODE_MMAP)")
+                        loadMethodTwoArg.invoke(null, modelPath, LOAD_MODE_MMAP)
+                    }
+                    loadMethodOneArg != null -> {
+                        log("Using Module.load(path) — default mode")
+                        loadMethodOneArg.invoke(null, modelPath)
+                    }
+                    else -> throw RuntimeException("No suitable Module.load() method found")
+                }
+                val loadTime = System.currentTimeMillis() - t0
+                log("Module loaded in ${loadTime}ms: ${module!!.javaClass.name}")
+
+                // 3. Load the "forward" method into memory.
+                // ExecuTorch requires this before the first forward() call.
+                try {
+                    val loadMethodHandle = module!!.javaClass.getMethod("loadMethod", String::class.java)
+                    val loadResult = loadMethodHandle.invoke(module, "forward")
+                    log("loadMethod('forward') returned: $loadResult")
+                } catch (e: Exception) {
+                    log("loadMethod('forward') failed (may auto-load): ${e.message}")
+                }
+
+                // 4. Resolve reflection handles
+                resolveReflection()
+
+                isNativeLoaded = true
+
+                val status = if (tokenizer != null) "native_loaded" else "native_loaded_no_tokenizer"
+                log("=== MODEL READY === ($status)")
+                mainHandler.post { result.success(status) }
+
+            } catch (e: ClassNotFoundException) {
+                logError("ExecuTorch classes not found: ${e.message}", e)
+                isNativeLoaded = false
+                mainHandler.post { result.success("demo: ExecuTorch classes not found - ${e.message}") }
+            } catch (e: UnsatisfiedLinkError) {
+                logError("Native lib missing: ${e.message}", e)
+                isNativeLoaded = false
+                mainHandler.post { result.success("demo: native lib not loaded - ${e.message}") }
+            } catch (e: Exception) {
+                val rootCause = findRootCause(e)
+                val msg = "${rootCause.javaClass.simpleName}: ${rootCause.message}"
+                logError("Load error: $msg", e)
+                isNativeLoaded = false
+                mainHandler.post { result.success("demo: $msg") }
+            }
+        }
+    }
+
+    private fun findRootCause(e: Throwable): Throwable {
+        var cause: Throwable = e
+        while (cause.cause != null && cause.cause !== cause) {
+            cause = cause.cause!!
+        }
+        return cause
+    }
+
+    private fun resolveReflection() {
+        // Tensor class
+        tensorClass = Class.forName("org.pytorch.executorch.Tensor")
+        val tensorMethods = tensorClass!!.methods.map { it.name }.distinct().sorted()
+        log("Tensor methods: $tensorMethods")
+
+        // Tensor.fromBlob(long[], long[])
+        tensorFromBlobLongMethod = try {
+            tensorClass!!.getMethod("fromBlob", LongArray::class.java, LongArray::class.java)
+        } catch (e: NoSuchMethodException) {
+            log("Tensor.fromBlob(long[],long[]) not found, trying alternatives")
+            try {
+                tensorClass!!.getMethod("fromBlobLong", LongArray::class.java, LongArray::class.java)
+            } catch (e2: NoSuchMethodException) {
+                // Try other possible names
+                tensorClass!!.getMethod("createLong", LongArray::class.java, LongArray::class.java)
+            }
+        }
+        log("Tensor create: ${tensorFromBlobLongMethod!!.name}")
+
+        // getDataAsFloatArray
+        getDataAsFloatArrayMethod = try {
+            tensorClass!!.getMethod("getDataAsFloatArray")
+        } catch (e: NoSuchMethodException) {
+            tensorClass!!.getMethod("dataAsFloatArray")
+        }
+        log("Float data: ${getDataAsFloatArrayMethod!!.name}")
+
+        // EValue class
+        evalueClass = Class.forName("org.pytorch.executorch.EValue")
+        val evalueMethods = evalueClass!!.methods.map { it.name }.distinct().sorted()
+        log("EValue methods: $evalueMethods")
+
+        fromTensorMethod = evalueClass!!.getMethod("from", tensorClass)
+        toTensorMethod = evalueClass!!.getMethod("toTensor")
+
+        // Module forward/execute
+        val moduleClass = module!!.javaClass
+        val evalueArrayType = java.lang.reflect.Array.newInstance(evalueClass!!, 0).javaClass
+
+        // List all instance methods on module for debugging
+        val moduleMethods = moduleClass.methods
+            .filter { !java.lang.reflect.Modifier.isStatic(it.modifiers) }
+            .map { "${it.name}(${it.parameterTypes.joinToString { t -> t.simpleName }})" }
+        log("Module instance methods: $moduleMethods")
+
+        forwardMethod = try {
+            moduleClass.getMethod("forward", evalueArrayType)
+        } catch (e: NoSuchMethodException) {
+            log("forward(EValue[]) not found, trying execute(String, EValue[])")
+            try {
+                moduleClass.getMethod("execute", String::class.java, evalueArrayType)
+            } catch (e2: NoSuchMethodException) {
+                logError("Available methods: $moduleMethods")
+                throw e2
+            }
+        }
+        log("Forward: ${forwardMethod!!.name}(${forwardMethod!!.parameterTypes.joinToString { it.simpleName }})")
+
+        log("Reflection resolved OK")
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // INFERENCE — full-sequence, no KV-cache
+    // Matches run_inference_mixed_precision.py exactly.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun handleRunInference(
+        prompt: String,
+        context: String?,
+        result: MethodChannel.Result
+    ) {
+        if (!isNativeLoaded) {
+            result.error("DEMO_MODE", "Native ExecuTorch not loaded", null)
+            return
+        }
+        if (tokenizer == null) {
+            result.error("NO_TOKENIZER",
+                "Tokenizer not loaded. Please load vocab.json alongside the model.", null)
+            return
+        }
+
+        log("=== INFERENCE START === prompt: \"$prompt\"")
+
+        executor.execute {
+            try {
+                val response = generate(prompt, context)
+                log("=== INFERENCE DONE === ${response.length} chars")
+                mainHandler.post { result.success(response) }
+            } catch (e: Exception) {
+                val rootCause = findRootCause(e)
+                val msg = "${rootCause.javaClass.simpleName}: ${rootCause.message}"
+                logError("Inference error: $msg", e)
+                mainHandler.post { result.error("INFERENCE_ERROR", msg, null) }
+            }
+        }
+    }
+
+    /**
+     * Run one forward pass with the full sequence.
+     *
+     * Inputs:  input_ids [1, seq_len], attention_mask [1, seq_len]
+     * Output:  logits as flat float array of size seq_len * vocab_size
+     */
+    private fun forwardFullSequence(tokenIds: LongArray): FloatArray {
+        val seqLen = tokenIds.size.toLong()
+
+        // input_ids: shape [1, seq_len]
+        val idsTensor = tensorFromBlobLongMethod!!.invoke(
+            null, tokenIds, longArrayOf(1L, seqLen)
+        )
+        // attention_mask: shape [1, seq_len] — all 1s
+        val maskData = LongArray(tokenIds.size) { 1L }
+        val maskTensor = tensorFromBlobLongMethod!!.invoke(
+            null, maskData, longArrayOf(1L, seqLen)
+        )
+
+        val idsEValue = fromTensorMethod!!.invoke(null, idsTensor)
+        val maskEValue = fromTensorMethod!!.invoke(null, maskTensor)
+
+        val evalueArray = java.lang.reflect.Array.newInstance(evalueClass!!, 2)
+        java.lang.reflect.Array.set(evalueArray, 0, idsEValue)
+        java.lang.reflect.Array.set(evalueArray, 1, maskEValue)
+
+        val outputs = if (forwardMethod!!.name == "execute") {
+            forwardMethod!!.invoke(module, "forward", evalueArray)
+        } else {
+            forwardMethod!!.invoke(module, evalueArray as Any)
+        }
+
+        val firstEValue = java.lang.reflect.Array.get(outputs, 0)
+        val logitsTensor = toTensorMethod!!.invoke(firstEValue)
+        return getDataAsFloatArrayMethod!!.invoke(logitsTensor) as FloatArray
+    }
+
+    /**
+     * Autoregressive generation — full-sequence forward pass each step.
+     *
+     * Since the model has no KV-cache, each forward pass re-processes
+     * the entire sequence. Slower than cached generation but matches
+     * how the model was exported (use_cache=False).
+     */
+    private fun generate(prompt: String, context: String?): String {
+        val tok = tokenizer!!
+
+        // Format with Gemma chat template → token IDs
+        val promptIds = tok.formatGemmaChat(prompt, context)
+        val promptLen = promptIds.size
+
+        if (promptLen >= MAX_SEQ_LEN) {
+            log("WARNING: Prompt $promptLen tokens exceeds MAX_SEQ_LEN=$MAX_SEQ_LEN, truncating")
+            return generate_truncated(promptIds, tok)
+        }
+
+        log("Prompt tokens: $promptLen, max new tokens: $MAX_NEW_TOKENS")
+
+        // Build mutable sequence (prompt + generated)
+        val totalSeq = promptIds.toMutableList()
+
+        // ── First forward pass (prefill) ─────────────────────────────
+        log("Running prompt forward pass...")
+        val t0 = System.currentTimeMillis()
+
+        var logitsFlat = forwardFullSequence(totalSeq.toLongArray())
+
+        val tPrefill = System.currentTimeMillis() - t0
+        log("Prefill done: ${tPrefill}ms, logits size: ${logitsFlat.size}")
+
+        // Extract vocab size from flat logits: total = seq_len * vocab_size
+        val vocabSize = logitsFlat.size / totalSeq.size
+        log("Detected vocab_size=$vocabSize (logits ${logitsFlat.size} / seq ${totalSeq.size})")
+
+        // Sample first new token from logits at last position
+        val lastPosLogits = extractLastPositionLogits(logitsFlat, totalSeq.size, vocabSize)
+        var nextTokenId = sampleToken(lastPosLogits)
+
+        if (nextTokenId == tok.eosTokenId || nextTokenId == tok.endOfTurnId) {
+            log("Model produced stop token immediately (id=$nextTokenId)")
+            return ""
+        }
+
+        val generatedIds = mutableListOf(nextTokenId)
+        totalSeq.add(nextTokenId.toLong())
+
+        // ── Autoregressive decode loop ───────────────────────────────
+        val tDecodeStart = System.currentTimeMillis()
+
+        for (step in 1 until MAX_NEW_TOKENS) {
+            if (totalSeq.size >= MAX_SEQ_LEN) {
+                log("Reached MAX_SEQ_LEN ($MAX_SEQ_LEN), stopping")
+                break
+            }
+
+            try {
+                logitsFlat = forwardFullSequence(totalSeq.toLongArray())
+            } catch (e: Exception) {
+                logError("Forward failed at step $step (seqLen=${totalSeq.size}): ${e.message}", e)
+                break
+            }
+
+            val stepLogits = extractLastPositionLogits(logitsFlat, totalSeq.size, vocabSize)
+            nextTokenId = sampleToken(stepLogits)
+
+            if (nextTokenId == tok.eosTokenId || nextTokenId == tok.endOfTurnId) {
+                log("Stop token at step $step (id=$nextTokenId)")
+                break
+            }
+
+            generatedIds.add(nextTokenId)
+            totalSeq.add(nextTokenId.toLong())
+
+            if (step % 5 == 0) {
+                val elapsed = System.currentTimeMillis() - tDecodeStart
+                val rate = if (elapsed > 0) step * 1000.0 / elapsed else 0.0
+                log("  Step $step/${MAX_NEW_TOKENS}: ${String.format("%.2f", rate)} tok/s")
+            }
+        }
+
+        val totalMs = System.currentTimeMillis() - t0
+        val decodeMs = System.currentTimeMillis() - tDecodeStart
+        val nGen = generatedIds.size
+        log("Generated $nGen tokens in ${totalMs}ms total (decode: ${decodeMs}ms, " +
+                "${if (decodeMs > 0) String.format("%.2f", nGen * 1000.0 / decodeMs) else "?"} tok/s)")
+
+        val decoded = tok.decode(generatedIds)
+        log("Output: \"${decoded.take(200)}\"")
+        return decoded
+    }
+
+    private fun generate_truncated(promptIds: LongArray, tok: SimpleTokenizer): String {
+        val truncated = promptIds.take(MAX_SEQ_LEN - 1).toLongArray()
+        val logitsFlat = forwardFullSequence(truncated)
+        val vocabSize = logitsFlat.size / truncated.size
+        val lastLogits = extractLastPositionLogits(logitsFlat, truncated.size, vocabSize)
+        val tokenId = sampleToken(lastLogits)
+        return if (tokenId == tok.eosTokenId || tokenId == tok.endOfTurnId) {
+            "(Prompt too long, no room for generation)"
+        } else {
+            tok.decode(listOf(tokenId))
+        }
+    }
+
+    /**
+     * Extract logits for the last position from the flat array.
+     * logits layout: [seq_len, vocab_size] flattened row-major.
+     * Last position starts at offset (seq_len - 1) * vocab_size.
+     */
+    private fun extractLastPositionLogits(
+        flatLogits: FloatArray, seqLen: Int, vocabSize: Int
+    ): FloatArray {
+        val offset = (seqLen - 1) * vocabSize
+        return flatLogits.copyOfRange(offset, offset + vocabSize)
+    }
+
+    /**
+     * Greedy argmax (temperature=0) or temperature-scaled top-k sampling.
+     */
+    private fun sampleToken(logits: FloatArray): Int {
+        if (TEMPERATURE <= 0f) {
+            var maxIdx = 0
+            var maxVal = logits[0]
+            for (i in 1 until logits.size) {
+                if (logits[i] > maxVal) {
+                    maxVal = logits[i]
+                    maxIdx = i
+                }
+            }
+            return maxIdx
+        }
+
+        val scaled = FloatArray(logits.size) { logits[it] / TEMPERATURE }
+        val k = minOf(TOP_K, scaled.size)
+        data class IdxVal(val idx: Int, val value: Float)
+
+        val topK = scaled.mapIndexed { i, v -> IdxVal(i, v) }
+            .sortedByDescending { it.value }
+            .take(k)
+
+        val maxVal = topK.first().value
+        val exps = topK.map { Math.exp((it.value - maxVal).toDouble()).toFloat() }
+        val sumExps = exps.sum()
+        val probs = exps.map { it / sumExps }
+
+        val r = Math.random().toFloat()
+        var cumulative = 0f
+        for (i in probs.indices) {
+            cumulative += probs[i]
+            if (r < cumulative) return topK[i].idx
+        }
+        return topK.last().idx
+    }
+}

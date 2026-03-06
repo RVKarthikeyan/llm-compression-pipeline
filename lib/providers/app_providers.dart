@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -113,7 +115,18 @@ class ModelNotifier extends Notifier<ModelState> {
       if (vocabPath != null) args['vocabPath'] = vocabPath;
       if (configPath != null) args['configPath'] = configPath;
 
-      final result = await _channel.invokeMethod<String>('loadModel', args);
+      debugPrint('[MODEL] Loading model: $path');
+      debugPrint('[MODEL] Vocab: $vocabPath');
+      debugPrint('[MODEL] Config: $configPath');
+
+      final result = await _channel
+          .invokeMethod<String>('loadModel', args)
+          .timeout(
+            const Duration(seconds: 120),
+            onTimeout: () => 'demo: model load timed out after 120s',
+          );
+
+      debugPrint('[MODEL] Load result: $result');
 
       final hasTok = result != null &&
           !result.contains('no_tokenizer') &&
@@ -125,16 +138,19 @@ class ModelNotifier extends Notifier<ModelState> {
         hasTokenizer: hasTok,
       );
     } on PlatformException catch (e) {
+      debugPrint('[MODEL] PlatformException: ${e.message}');
       state = state.copyWith(
         loadState: ModelLoadState.loaded,
         statusMessage: 'demo: ${e.message}',
       );
     } on MissingPluginException {
+      debugPrint('[MODEL] MissingPluginException');
       state = state.copyWith(
         loadState: ModelLoadState.loaded,
         statusMessage: 'demo: native channel not available',
       );
     } catch (e) {
+      debugPrint('[MODEL] Error: $e');
       state = state.copyWith(
         loadState: ModelLoadState.error,
         statusMessage: 'Error: $e',
@@ -182,7 +198,15 @@ class ChatNotifier extends Notifier<ChatState> {
   static const _channel = MethodChannel('com.example.my_ai/executorch');
 
   @override
-  ChatState build() => const ChatState();
+  ChatState build() {
+    // Listen for native log messages so they appear in flutter run console
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'log') {
+        debugPrint('[NATIVE] ${call.arguments}');
+      }
+    });
+    return const ChatState();
+  }
 
   Future<void> sendMessage(String userText) async {
     if (userText.trim().isEmpty) return;
@@ -195,16 +219,35 @@ class ChatNotifier extends Notifier<ChatState> {
       isInferencing: true,
     );
 
-    // RAG: retrieve context from ObjectBox vector DB
+    // RAG: retrieve context from ObjectBox
     final obs = ref.read(objectBoxProvider);
-    final contextChunks = obs.searchContext(userText);
+    final totalChunks = obs.count;
+
+    // For small documents (≤30 chunks), send the ENTIRE document
+    // so the model never misses critical sections like diagnoses.
+    // For larger docs, fall back to keyword search.
+    List<String> contextChunks;
+    if (totalChunks > 0 && totalChunks <= 30) {
+      contextChunks = obs.getAllChunks();
+    } else {
+      contextChunks = obs.searchContext(userText);
+    }
     final hasContext = contextChunks.isNotEmpty;
 
-    // Send user text + context separately — native side applies Gemma template
-    final ctx = hasContext ? contextChunks.join('\n') : null;
+    // Send full context chunks (no truncation — small DB, model needs all info)
+    String? ctx;
+    if (hasContext) {
+      ctx = contextChunks.join('\n\n');
+      // Cap total context to ~3000 chars to fit in SEQ_LEN with prompt overhead
+      if (ctx.length > 3000) {
+        ctx = ctx.substring(0, 3000);
+      }
+    }
 
     String aiResponse;
     bool usedNative = false;
+
+    debugPrint('[CHAT] Sending to native: prompt="$userText", hasContext=$hasContext');
 
     try {
       aiResponse = await _channel.invokeMethod<String>(
@@ -213,14 +256,29 @@ class ChatNotifier extends Notifier<ChatState> {
               'prompt': userText,
               'context': ctx,
             },
+          )
+          .timeout(
+            const Duration(seconds: 900),
+            onTimeout: () {
+              debugPrint('[CHAT] Inference timed out after 900s');
+              return '(Inference timed out — model may be too slow on this device. '
+                  'Try a simpler prompt.)';
+            },
           ) ??
           '(no response)';
       usedNative = true;
+      debugPrint('[CHAT] Native response: ${aiResponse.length} chars');
+
+      // Strip any leftover special tokens the native side missed
+      aiResponse = _cleanSpecialTokens(aiResponse);
     } on PlatformException catch (e) {
+      debugPrint('[CHAT] PlatformException: ${e.code} - ${e.message}');
       aiResponse = _demo(userText, contextChunks, e.message);
     } on MissingPluginException {
+      debugPrint('[CHAT] MissingPluginException');
       aiResponse = _demo(userText, contextChunks, null);
     } catch (e) {
+      debugPrint('[CHAT] Error: $e');
       aiResponse = _demo(userText, contextChunks, e.toString());
     }
 
@@ -257,7 +315,29 @@ class ChatNotifier extends Notifier<ChatState> {
         '${error != null ? '\nNative: $error' : ''}';
   }
 
-  void clearHistory() => state = const ChatState();
+  static const _specialTokens = [
+    '<|begin_of_text|>', '<|end_of_text|>',
+    '<|start_header_id|>', '<|end_header_id|>',
+    '<|eot_id|>', '<|finetune_right_pad_id|>',
+    '<bos>', '<eos>',
+    '<start_of_turn>', '<end_of_turn>',
+  ];
+
+  String _cleanSpecialTokens(String text) {
+    var result = text;
+    for (final token in _specialTokens) {
+      result = result.replaceAll(token, '');
+    }
+    return result.trim();
+  }
+
+  void clearHistory() {
+    state = const ChatState();
+    // Reset KV-cache position counter (no model reload — safe)
+    try {
+      _channel.invokeMethod('resetCache');
+    } catch (_) {}
+  }
 }
 
 final chatProvider =
