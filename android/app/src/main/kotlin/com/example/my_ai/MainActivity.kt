@@ -296,10 +296,7 @@ class MainActivity : FlutterActivity() {
                 // Strip any special tokens that leaked through
                 output = stripSpecialTokens(output)
 
-                // Prepend the seed phrase if we used context (echo=false strips it)
-                if (!context.isNullOrBlank() && output.isNotEmpty()) {
-                    output = "Based on the text provided, $output"
-                }
+
 
                 log("Generated $tokenCount tokens, ${output.length} chars in ${elapsed}ms")
                 if (elapsed > 0 && tokenCount > 0) {
@@ -335,14 +332,14 @@ class MainActivity : FlutterActivity() {
         val sb = StringBuilder()
         sb.append("<|begin_of_text|>")
 
-        // System message — extractive reading comprehension framing
+        // System message
         sb.append("<|start_header_id|>system<|end_header_id|>\n\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a reading comprehension assistant. ")
-            sb.append("Read the text carefully and answer questions using ONLY information explicitly written in the text. ")
-            sb.append("Do NOT use your own knowledge. Do NOT guess. Do NOT infer diagnoses or facts not stated in the text. ")
-            sb.append("If the text says a value is Normal, report it as Normal. If the text says a value is High, report it as High. ")
-            sb.append("Only mention diagnoses that are explicitly listed in the text.")
+            sb.append("You are a helpful document assistant. ")
+            sb.append("A document is provided below. Answer the user's question using the document first. ")
+            sb.append("Clearly distinguish what comes from the document vs your own knowledge. ")
+            sb.append("If the document contains the answer, quote or reference the relevant parts. ")
+            sb.append("If the document does not fully answer the question, say so, then add anything you know that might help.")
         } else {
             sb.append("You are a helpful assistant. Provide a detailed and complete answer.")
         }
@@ -351,8 +348,7 @@ class MainActivity : FlutterActivity() {
         // User message
         sb.append("<|start_header_id|>user<|end_header_id|>\n\n")
         if (!context.isNullOrBlank()) {
-            sb.append("Read the following text and answer the question.\n\n")
-            sb.append("TEXT:\n")
+            sb.append("DOCUMENT:\n")
             sb.append(context)
             sb.append("\n\nQUESTION: ")
             sb.append(userText)
@@ -361,11 +357,8 @@ class MainActivity : FlutterActivity() {
         }
         sb.append("<|eot_id|>")
 
-        // Assistant turn — seed with grounding phrase to force extractive behavior
+        // Assistant turn
         sb.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
-        if (!context.isNullOrBlank()) {
-            sb.append("Based on the text provided, ")
-        }
         return sb.toString()
     }
 
@@ -373,10 +366,10 @@ class MainActivity : FlutterActivity() {
         val sb = StringBuilder()
         sb.append("<bos><start_of_turn>user\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a reading comprehension assistant. ")
-            sb.append("Answer using ONLY information explicitly written in the text. ")
-            sb.append("Do NOT use your own knowledge or guess.\n\n")
-            sb.append("TEXT:\n")
+            sb.append("You are a helpful document assistant. ")
+            sb.append("Answer using the document first, then add your own knowledge if helpful. ")
+            sb.append("Clearly distinguish what comes from the document vs your own knowledge.\n\n")
+            sb.append("DOCUMENT:\n")
             sb.append(context)
             sb.append("\n\nQUESTION: ")
             sb.append(userText)
@@ -384,9 +377,6 @@ class MainActivity : FlutterActivity() {
             sb.append(userText)
         }
         sb.append("<end_of_turn>\n<start_of_turn>model\n")
-        if (!context.isNullOrBlank()) {
-            sb.append("Based on the text provided, ")
-        }
         return sb.toString()
     }
 
