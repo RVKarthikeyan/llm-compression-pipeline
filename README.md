@@ -1,602 +1,290 @@
-# LLM Compression Pipeline
+# Llama-3.2-1B-Instruct Compression Pipeline
 
-> **Knowledge Distillation for Domain-Specific Chatbot Development**  
-> A robust pipeline for creating specialized, mobile-optimized conversational AI models through knowledge distillation
-
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Hugging Face](https://img.shields.io/badge/🤗-Hugging%20Face-yellow)](https://huggingface.co/)
-
-## 📋 Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Detailed Usage](#detailed-usage)
-- [Project Structure](#project-structure)
-- [Technical Specifications](#technical-specifications)
-- [Results](#results)
-- [Applications](#applications)
-- [Troubleshooting](#troubleshooting)
-- [Future Enhancements](#future-enhancements)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
-
-## 🌟 Overview
-
-This project demonstrates an end-to-end **knowledge distillation pipeline** for creating domain-specific chatbots by transferring knowledge from a larger "teacher" model to a smaller, more efficient "student" model. The resulting models are optimized for deployment on mobile and edge devices while maintaining high-quality conversational capabilities.
-
-### Key Concepts
-
-**Knowledge Distillation** is a model compression technique where:
-
-- A smaller "student" model learns to mimic a larger "teacher" model's behavior
-- Enables deployment on resource-constrained devices
-- Preserves the teacher model's knowledge with reduced computational requirements
-- Achieves faster inference times without significant quality loss
-
-### Models Used
-
-- **Teacher Model:** Google Gemma 2 2B (Instruction-tuned) - Knowledge source
-- **Student Model:** Microsoft Phi-3 Mini (3.8B parameters) - Learns from teacher
-- **Knowledge Source:** Domain-specific PDF documents
-- **Deployment Format:** GGUF (GPT-Generated Unified Format) for mobile optimization
-
-## ✨ Features
-
-- 🎓 **Knowledge Distillation:** Transfer domain expertise from large to small models
-- 📄 **PDF Knowledge Extraction:** Automatic extraction and processing of PDF documents with OCR support
-- 🔄 **Synthetic Data Generation:** Context-aware training data creation using teacher model
-- ⚡ **Parameter-Efficient Fine-Tuning:** LoRA (Low-Rank Adaptation) for efficient training
-- 📱 **Mobile Optimization:** GGUF conversion with 4-bit quantization for edge deployment
-- 🎯 **Domain Specialization:** Create expert chatbots for specific knowledge domains
-- 🔬 **Reproducible Pipeline:** Seeded random states for consistent results
-- 💾 **Memory Efficient:** 4-bit quantization reduces VRAM requirements
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Knowledge Distillation Pipeline              │
-└─────────────────────────────────────────────────────────────────┘
-
-Phase 1: Knowledge Extraction
-┌──────────────────┐         ┌──────────────────┐
-│  PDF Document    │ ───────>│  Text Extraction │
-│  (Domain Data)   │         │  & Processing    │
-└──────────────────┘         └──────────────────┘
-                                      │
-                                      ▼
-Phase 2: Data Generation
-┌──────────────────┐         ┌──────────────────┐
-│  Teacher Model   │ ───────>│   Synthetic      │
-│  (Gemma 2 2B)    │         │  Conversations   │
-└──────────────────┘         └──────────────────┘
-                                      │
-                                      ▼
-Phase 3: Student Training
-┌──────────────────┐         ┌──────────────────┐
-│  Student Model   │ <───────│  LoRA Fine-Tune  │
-│  (Phi-3 Mini)    │         │  Supervised      │
-└──────────────────┘         └──────────────────┘
-                                      │
-                                      ▼
-Phase 4: Deployment Optimization
-┌──────────────────┐         ┌──────────────────┐
-│  GGUF Format     │ <───────│  Quantization &  │
-│  (Mobile-Ready)  │         │  Conversion      │
-└──────────────────┘         └──────────────────┘
-```
-
-## 🔧 Installation
-
-### Prerequisites
-
-- Python 3.8 or higher
-- CUDA-compatible GPU with minimum 16GB VRAM (T4 GPU recommended)
-- Hugging Face account with model access permissions
-- 10GB+ free disk space
-
-### Setup Instructions
-
-1. **Clone the repository:**
-
-```bash
-git clone https://github.com/RVKarthikeyan/llm-compression-pipeline.git
-cd llm-compression-pipeline
-```
-
-2. **Install dependencies:**
-
-```bash
-# Uninstall conflicting packages
-pip uninstall -y cudf-cu12 pylibcudf-cu12
-
-# Install core ML libraries
-pip install -U transformers accelerate bitsandbytes datasets trl peft huggingface_hub
-
-# Install utility libraries
-pip install -U PyPDF2 tqdm pytesseract pdf2image
-
-# Install system dependencies (Linux/Colab)
-apt-get install -y tesseract-ocr poppler-utils
-```
-
-3. **Request model access:**
-
-   - Visit [google/gemma-2-2b-it](https://huggingface.co/google/gemma-2-2b-it) and request access
-   - Visit [microsoft/Phi-3-mini-4k-instruct](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and request access
-   - Access is typically granted within 5-10 minutes
-
-4. **Authenticate with Hugging Face:**
-
-```python
-from huggingface_hub import login
-login(token="your_hf_token_here")
-```
-
-## 🚀 Quick Start
-
-### Basic Usage
-
-1. **Prepare your domain-specific PDF:**
-
-   - Place your PDF file in the project directory
-   - Update the `pdf_path` variable in the notebook
-
-2. **Run the notebook:**
-
-   - Open `llmcompression.ipynb` in Jupyter/Colab
-   - Execute cells sequentially
-   - Follow the interactive prompts
-
-3. **Expected outputs:**
-   - `domain_specific_chat_data.json` - Training dataset
-   - `phi3-domain-specialist.gguf` - FP16 model (~2.3 GB)
-   - `phi3-domain-specialist-q4_k_m.gguf` - Quantized model (~1.2 GB) **[Recommended]**
-
-### Runtime Expectations
-
-| Phase                | Duration      | Description                        |
-| -------------------- | ------------- | ---------------------------------- |
-| Setup                | 5-10 min      | Dependencies and authentication    |
-| Knowledge Generation | 15-20 min     | PDF extraction and data generation |
-| Model Training       | 30-45 min     | LoRA fine-tuning (main bottleneck) |
-| Conversion           | 10-15 min     | GGUF format and quantization       |
-| **Total**            | **1-2 hours** | Complete pipeline on T4 GPU        |
-
-## 📖 Detailed Usage
-
-### Phase 1: Environment Setup
-
-```python
-# Set random seeds for reproducibility
-import random, numpy as np, torch
-
-seed = 42
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-```
-
-### Phase 2: Knowledge Extraction
-
-```python
-# Load teacher model with 4-bit quantization
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
-)
-
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b-it")
-teacher_model = AutoModelForCausalLM.from_pretrained(
-    "google/gemma-2-2b-it",
-    quantization_config=bnb_config,
-    device_map="auto"
-)
-```
-
-### Phase 3: Synthetic Data Generation
-
-The pipeline automatically:
-
-1. Extracts text from PDF using OCR
-2. Chunks content into manageable segments
-3. Generates domain-specific Q&A pairs
-4. Creates multi-turn conversational examples
-5. Saves structured training data
-
-### Phase 4: Student Model Fine-Tuning
-
-```python
-# LoRA configuration
-from peft import LoraConfig
-
-lora_config = LoraConfig(
-    r=16,                    # LoRA rank
-    lora_alpha=32,           # Scaling factor
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM"
-)
-```
-
-Training parameters:
-
-- **Epochs:** 3
-- **Batch Size:** 4
-- **Learning Rate:** 2e-4
-- **Max Length:** 512 tokens
-- **Optimizer:** AdamW with paged optimizers
-
-### Phase 5: Model Conversion
-
-```bash
-# Convert to GGUF format
-python llama.cpp/convert_hf_to_gguf.py merged_model --outfile phi3-domain-specialist.gguf --outtype f16
-
-# Apply 4-bit quantization
-./llama.cpp/llama-quantize phi3-domain-specialist.gguf phi3-domain-specialist-q4_k_m.gguf Q4_K_M
-```
-
-## 📁 Project Structure
-
-```
-llm-compression-pipeline/
-│
-├── llmcompression.ipynb          # Main Jupyter notebook
-├── README.md                      # This file
-├── requirements.txt               # Python dependencies (optional)
-│
-├── data/                          # Generated data directory
-│   ├── domain_specific_chat_data.json
-│   └── olympics.pdf               # Example domain PDF
-│
-├── models/                        # Model outputs
-│   ├── phi3-domain-specialist/
-│   │   ├── adapter_config.json
-│   │   ├── adapter_model.safetensors
-│   │   └── training_args.bin
-│   │
-│   ├── merged_model/              # LoRA merged model
-│   │
-│   └── gguf/                      # GGUF exports
-│       ├── phi3-domain-specialist.gguf
-│       └── phi3-domain-specialist-q4_k_m.gguf
-│
-└── checkpoints/                   # Training checkpoints
-    └── checkpoint-{step}/
-```
-
-## 🔬 Technical Specifications
-
-### Model Configuration
-
-| Component                     | Specification                          |
-| ----------------------------- | -------------------------------------- |
-| **Teacher Model**             | Google Gemma 2 2B (Instruction-tuned)  |
-| **Student Model**             | Microsoft Phi-3 Mini (3.8B parameters) |
-| **Architecture**              | Transformer-based decoder              |
-| **Context Window**            | 4096 tokens                            |
-| **Training Method**           | LoRA (Low-Rank Adaptation)             |
-| **Trainable Parameters**      | ~1% of total parameters                |
-| **Quantization (Training)**   | 4-bit NF4 with double quantization     |
-| **Quantization (Deployment)** | FP16 / Q4_K_M                          |
-| **Deployment Format**         | GGUF (GPT-Generated Unified Format)    |
-
-### Hardware Requirements
-
-| Component   | Minimum        | Recommended           |
-| ----------- | -------------- | --------------------- |
-| **GPU**     | 16GB VRAM (T4) | 24GB+ VRAM (A10/A100) |
-| **RAM**     | 16GB           | 32GB+                 |
-| **Storage** | 10GB free      | 20GB+ free            |
-| **CPU**     | 4 cores        | 8+ cores              |
-
-### Model Sizes
-
-| Format           | Size   | Use Case               |
-| ---------------- | ------ | ---------------------- |
-| **Base Model**   | ~3.8GB | Original Phi-3 Mini    |
-| **LoRA Adapter** | ~50MB  | Training checkpoint    |
-| **Merged Model** | ~7.5GB | Pre-conversion         |
-| **FP16 GGUF**    | ~2.3GB | High-quality inference |
-| **Q4_K_M GGUF**  | ~1.2GB | Mobile deployment ✅   |
-
-## 📊 Results
-
-### Performance Metrics
-
-- **Training Loss:** Converges to ~0.5-0.7 after 3 epochs
-- **Inference Speed:** ~20-30 tokens/second on CPU (Q4_K_M)
-- **Memory Footprint:** ~2GB RAM for Q4_K_M model
-- **Response Quality:** Maintains 90%+ of teacher model quality
-- **Parameter Efficiency:** Only ~1% of parameters trained with LoRA
-
-### Example Outputs
-
-**Query:** "What are the key events in the Olympics?"
-
-**Response (Domain-Specific Model):**
-
-```
-The Olympics feature a wide range of athletic competitions across multiple sports.
-Key events include track and field, swimming, gymnastics, and team sports like
-basketball and soccer. Athletes compete for gold, silver, and bronze medals
-representing their countries...
-```
-
-### Advantages
-
-✅ **Reduced Latency:** 3-5x faster inference than full-scale models  
-✅ **Lower Costs:** Minimal GPU requirements for deployment  
-✅ **Domain Expertise:** Specialized knowledge in target domain  
-✅ **Mobile-Ready:** Runs on smartphones and edge devices  
-✅ **Privacy-Friendly:** Can run entirely offline
-
-## 🎯 Applications
-
-This methodology can be applied to various domains:
-
-### 1. **Legal Document Analysis**
-
-- Contract interpretation
-- Case law research
-- Regulatory compliance guidance
-
-### 2. **Medical Literature Comprehension**
-
-- Clinical guidelines assistance
-- Medical research summaries
-- Patient education materials
-
-### 3. **Technical Documentation**
-
-- API documentation chatbots
-- Software troubleshooting assistants
-- Product manual Q&A systems
-
-### 4. **Academic Research Support**
-
-- Literature review assistance
-- Citation and reference help
-- Research methodology guidance
-
-### 5. **Corporate Policy Guidance**
-
-- Employee handbook Q&A
-- Compliance policy interpretation
-- Internal knowledge management
-
-### 6. **Educational Content**
-
-- Personalized tutoring systems
-- Course material assistants
-- Exam preparation helpers
-
-## 🛠️ Troubleshooting
-
-### Common Issues
-
-#### 1. **Authentication Errors (401 Unauthorized)**
-
-**Problem:** Cannot access Hugging Face models
-
-**Solution:**
-
-- Request access to both Gemma 2 2B and Phi-3 Mini models
-- Wait 5-10 minutes for approval
-- Re-authenticate with valid token
-- Use 'Read' or 'Write' token (not 'Fine-grained')
-
-#### 2. **CUDA Out of Memory**
-
-**Problem:** GPU memory exhausted during training
-
-**Solution:**
-
-```python
-# Reduce batch size
-per_device_train_batch_size = 2  # Instead of 4
-
-# Enable gradient checkpointing
-gradient_checkpointing = True
-
-# Clear GPU cache
-import torch
-torch.cuda.empty_cache()
-```
-
-#### 3. **PDF Extraction Failures**
-
-**Problem:** Cannot extract text from PDF
-
-**Solution:**
-
-- Verify PDF is not password-protected
-- Check PDF file path and spelling
-- Install OCR dependencies: `apt-get install tesseract-ocr poppler-utils`
-- Try alternative: Use `pdfplumber` for complex PDFs
-
-#### 4. **Empty Training Dataset**
-
-**Problem:** Data generation produces no examples
-
-**Solution:**
-
-- Verify teacher model loaded successfully
-- Check PDF contains sufficient text
-- Customize `domain_prompts` list with specific questions
-- Review generation logs for errors
-
-#### 5. **GGUF Conversion Errors**
-
-**Problem:** Conversion script fails
-
-**Solution:**
-
-```bash
-# Update llama.cpp
-cd llama.cpp
-git pull
-make clean && make
-
-# Verify merged model path
-ls merged_model/  # Should contain config.json and safetensors files
-```
-
-#### 6. **Poor Model Performance**
-
-**Problem:** Low-quality responses from fine-tuned model
-
-**Solution:**
-
-- Increase training epochs (3 → 5)
-- Generate more training examples (50+ recommended)
-- Increase LoRA rank (16 → 32 or 64)
-- Use higher-quality, well-structured PDF documents
-
-### Pre-Execution Checklist
-
-Before running the notebook, verify:
-
-- [ ] GPU available: `torch.cuda.is_available()` returns `True`
-- [ ] Hugging Face authentication completed
-- [ ] PDF document uploaded to project directory
-- [ ] Model access granted (Gemma 2 2B and Phi-3 Mini)
-- [ ] Minimum 16GB GPU VRAM available
-- [ ] 10GB+ free disk space
-
-### Monitoring Commands
-
-```bash
-# Check GPU usage
-nvidia-smi
-
-# Monitor GPU in real-time
-watch -n 1 nvidia-smi
-
-# Check disk space
-df -h
-
-# Monitor training progress
-tail -f training_output.log
-```
-
-## 🚀 Future Enhancements
-
-### Planned Features
-
-1. **Retrieval-Augmented Generation (RAG)**
-
-   - Real-time document updates
-   - Vector database integration
-   - Dynamic knowledge retrieval
-
-2. **Multi-Document Integration**
-
-   - Process multiple PDFs simultaneously
-   - Cross-document knowledge synthesis
-   - Hierarchical knowledge organization
-
-3. **Advanced Quantization**
-
-   - Experiment with Q5_K_M and Q6_K
-   - Mixed-precision inference
-   - Dynamic quantization strategies
-
-4. **Cross-Lingual Support**
-
-   - Multi-language knowledge distillation
-   - Translation-aware training
-   - Multilingual chatbot creation
-
-5. **Continuous Learning**
-
-   - Incremental fine-tuning from user interactions
-   - Active learning strategies
-   - Feedback-driven improvement
-
-6. **Deployment Optimization**
-
-   - Docker containerization
-   - API endpoint creation (FastAPI/Flask)
-   - Cloud deployment templates
-   - Mobile SDK integration
-
-7. **Evaluation Framework**
-   - Automated quality assessment
-   - Domain-specific benchmarks
-   - A/B testing capabilities
-
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-### Development Guidelines
-
-- Follow PEP 8 style guidelines for Python code
-- Add docstrings to all functions and classes
-- Include unit tests for new features
-- Update documentation for significant changes
-- Maintain backward compatibility when possible
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-### Models & Frameworks
-
-- **Google** for Gemma 2 2B model
-- **Microsoft** for Phi-3 Mini model
-- **Hugging Face** for Transformers library and model hub
-- **Meta AI** for llama.cpp conversion tools
-
-### Libraries & Tools
-
-- [PyTorch](https://pytorch.org/) - Deep learning framework
-- [Transformers](https://huggingface.co/docs/transformers/) - Model implementations
-- [PEFT](https://github.com/huggingface/peft) - Parameter-efficient fine-tuning
-- [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) - Quantization
-- [TRL](https://github.com/huggingface/trl) - Transformer reinforcement learning
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF format and inference
-
-### Research & Inspiration
-
-- Hinton et al. - "Distilling the Knowledge in a Neural Network" (2015)
-- Hu et al. - "LoRA: Low-Rank Adaptation of Large Language Models" (2021)
-- GGUF Format - GPT-Generated Unified Format for efficient model deployment
-
-## 📞 Contact & Support
-
-- **Author:** RV Karthikeyan
-- **GitHub:** [@RVKarthikeyan](https://github.com/RVKarthikeyan)
-- **Repository:** [llm-compression-pipeline](https://github.com/RVKarthikeyan/llm-compression-pipeline)
-- **Issues:** [Report bugs or request features](https://github.com/RVKarthikeyan/llm-compression-pipeline/issues)
+A two-stage model compression pipeline that reduces **Llama-3.2-1B-Instruct** from 16 layers to 14 layers using Layer Collapse (LaCo) pruning, then recovers performance using LoRA fine-tuning.
 
 ---
 
-<div align="center">
+## What This Does
 
-**⭐ If you find this project helpful, please consider giving it a star! ⭐**
+| Stage | Technique | Purpose |
+|-------|-----------|---------|
+| Phase 1 | LaCo Layer Collapse | Prune 2 layer pairs (16 → 14 layers), reduce model size |
+| Phase 2 | LoRA Fine-tuning | Heal the performance lost from pruning |
+| Phase 3 | LoRA Merge + Export | Bake LoRA weights into base model, save final model |
 
-Made with ❤️ for the AI community
+**End result:** A compressed Llama model with fewer layers, smaller file size, faster inference, and recovered quality — exported as `.safetensors` and optionally uploaded to Google Drive for sharing.
 
-</div>
+---
+
+## Requirements
+
+### 1. Hardware
+
+| GPU | VRAM | Status |
+|-----|------|--------|
+| T4 | 16 GB | Supported (Colab Free/Pro) |
+| L4 | 24 GB | Supported (Colab Pro+) |
+| V100 | 16 GB | Supported (Colab Pro) |
+| A100 | 40 GB | Supported (Colab Pro+) |
+| H100 | 80 GB | Supported (Colab Pro+) |
+
+> No GPU = pipeline runs but with minimal settings (100 samples, batch size 1). Not recommended for real use.
+
+### 2. Software (auto-installed in notebook)
+
+```
+transformers
+accelerate
+peft
+datasets
+bitsandbytes
+sentencepiece
+protobuf
+huggingface_hub
+```
+
+### 3. Accounts Needed
+
+- **Hugging Face account** — to download the model
+- **Google account** — for Google Colab and Google Drive
+- **Meta license approval** — required to access Llama models (free, auto-approved)
+
+---
+
+## Setup Before Running
+
+### Step 1: Accept Meta License
+
+1. Go to: https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct
+2. Log in to your Hugging Face account
+3. Fill in the license form (name, country, intended use)
+4. Click Submit — approval is usually instant
+5. You will see: "You have been granted access to this model"
+
+### Step 2: Get a Hugging Face Token
+
+1. Go to: https://huggingface.co/settings/tokens
+2. Click "New token"
+3. Name: anything (e.g. `colab-llama`)
+4. Type: `Read`
+5. Click "Generate a token"
+6. Copy the token (starts with `hf_...`) — you only see it once
+
+### Step 3: Add Token to Colab Secrets
+
+1. Open the notebook in Google Colab
+2. Click the key icon in the left sidebar (Secrets)
+3. Click "Add new secret"
+4. Name: `HF_TOKEN`
+5. Value: paste your `hf_...` token
+6. Toggle "Notebook access" ON
+
+---
+
+## How to Run
+
+1. Upload `colab_notebook_with_auth.ipynb` to Google Colab
+   - File → Upload notebook → select the file
+2. Set runtime to GPU
+   - Runtime → Change runtime type → GPU → Save
+3. Run all cells top to bottom
+   - Runtime → Run all
+
+The notebook will handle everything automatically.
+
+---
+
+## Pipeline Walkthrough
+
+### Step 0: Authentication
+Loads your HF token from Colab Secrets and logs in to Hugging Face.
+
+### Step 1: Install Libraries
+Installs all required Python packages silently. Detects and prints GPU info.
+
+### Step 2: Configuration
+Auto-detects your GPU and sets optimal batch size, sequence length, and dataset size.
+
+```
+Base model    : meta-llama/Llama-3.2-1B-Instruct
+Layers merged : (2,3) and (7,8)  →  16 layers become 14
+Dataset       : timdettmers/openassistant-guanaco
+LoRA rank     : 16
+LoRA alpha    : 32
+Learning rate : 2e-4
+```
+
+### Step 3: Layer Collapse Class
+Defines `LayerCollapser` which:
+- Finds adjacent layer pairs
+- Merges them by averaging all weights
+- Reassigns `layer_idx` on attention modules (critical for KV cache correctness)
+
+### Step 4: Helper Functions
+- `load_and_prepare_dataset()` — loads and tokenizes the Guanaco dataset
+- `test_model()` — runs inference using the Llama-3 chat template format
+
+### Phase 1: LaCo Pruning
+1. Loads `meta-llama/Llama-3.2-1B-Instruct` (~2.5 GB download)
+2. Tests the model before pruning
+3. Merges layer pairs (2,3) and (7,8) by weight averaging
+4. Reassigns layer indices to fix KV cache
+5. Updates `config.num_hidden_layers` from 16 to 14
+6. Tests after pruning (some quality degradation is expected)
+7. Saves pruned model to `./compressed_llama/`
+
+### Phase 2: LoRA Fine-tuning
+1. Loads the Guanaco instruction dataset
+2. Applies LoRA adapters to all projection layers:
+   `q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj`
+3. Fine-tunes for 3 epochs using AdamW + cosine LR schedule
+4. Saves LoRA adapter weights to `./lora_adapters/`
+5. Tests healed model (quality should be close to original)
+
+### Phase 3: Merge and Export
+1. Reloads the pruned base model from disk
+2. Loads the LoRA adapters
+3. Merges LoRA into base model with `merge_and_unload()`
+4. Saves final model to `./final_healed_model/` in safetensors format
+5. Creates `compressed_llama_final.zip` archive
+6. Runs two final inference tests
+
+### Step 5: Summary
+Prints sizes of pruned model and final healed model in GB.
+
+### Step 5b: Upload to Google Drive
+1. Mounts your Google Drive
+2. Creates folder `MyDrive/Llama-3.2-1B-Compressed/`
+3. Copies zip archive and individual model files to Drive
+4. Prints instructions for sharing with others
+
+### Step 6: Download
+Downloads the zip file directly to your browser's download folder.
+
+---
+
+## Output Files
+
+```
+compressed_llama/          # Pruned model (16 → 14 layers)
+    config.json
+    model.safetensors
+    tokenizer files...
+
+lora_adapters/             # LoRA adapter weights only
+    adapter_config.json
+    adapter_model.safetensors
+
+final_healed_model/        # Final merged model (ready to use)
+    config.json
+    model.safetensors
+    tokenizer.json
+    tokenizer_config.json
+    special_tokens_map.json
+    generation_config.json
+
+compressed_llama_final.zip # Zip of final_healed_model for sharing
+```
+
+---
+
+## Using the Final Model
+
+### Load from local folder
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained(
+    "./final_healed_model",
+    torch_dtype="auto",
+    device_map="auto"
+)
+tokenizer = AutoTokenizer.from_pretrained("./final_healed_model")
+```
+
+### Load from Google Drive (in Colab)
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained(
+    "/content/drive/MyDrive/Llama-3.2-1B-Compressed/final_healed_model",
+    torch_dtype="auto",
+    device_map="auto"
+)
+tokenizer = AutoTokenizer.from_pretrained(
+    "/content/drive/MyDrive/Llama-3.2-1B-Compressed/final_healed_model"
+)
+```
+
+### Run inference
+
+```python
+messages = [{"role": "user", "content": "What is machine learning?"}]
+formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+inputs = tokenizer(formatted, return_tensors="pt").to(model.device)
+
+outputs = model.generate(
+    **inputs,
+    max_new_tokens=200,
+    temperature=0.7,
+    do_sample=True,
+    top_p=0.9,
+    pad_token_id=tokenizer.eos_token_id
+)
+
+new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+print(tokenizer.decode(new_tokens, skip_special_tokens=True))
+```
+
+---
+
+## Sharing the Model with Others
+
+After Step 5b completes:
+
+1. Go to https://drive.google.com
+2. Navigate to `MyDrive/Llama-3.2-1B-Compressed`
+3. Right-click the folder → Share → "Anyone with the link"
+4. Copy and share the link
+
+Recipients can either:
+- Download the zip file and use the model locally
+- Mount the shared Drive in their own Colab and load directly
+
+---
+
+## Common Errors and Fixes
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `GatedRepoError: 403 Forbidden` | Meta license not accepted | Visit the model page and accept the license, then re-run |
+| `IndexError: list index out of range` | KV cache layer index mismatch after collapse | Fixed in current version — layer_idx is reassigned after collapse |
+| `HF_TOKEN secret is empty` | Token not added to Colab Secrets | Add HF_TOKEN in the Colab key icon sidebar |
+| `CUDA out of memory` | Batch size too large for GPU | Reduce `per_device_train_batch_size` in CONFIG |
+| Phase 3 load fails | `num_hidden_layers` mismatch in config | Fixed in current version — config is updated after collapse |
+
+---
+
+## Project Structure
+
+```
+gemma_compression_pipeline/
+    colab_notebook_with_auth.ipynb   # Main notebook (run this)
+    README.md                        # This file
+    PRUNING_GUIDE.md                 # Theory and detailed explanation of LaCo + LoRA
+```
+
+---
+
+## Key Concepts
+
+**LaCo (Layer Collapse):** Reduces model depth by merging adjacent transformer layers. Merged weights are the element-wise average of both layers. This creates "weight shock" — temporary quality degradation that is fixed in Phase 2.
+
+**LoRA (Low-Rank Adaptation):** Adds small trainable matrices alongside frozen base weights. Only ~1-3% of parameters are trained, making fine-tuning fast and memory-efficient. After training, LoRA weights are merged back into the base model.
+
+**safetensors:** The output format for all saved models. Faster and safer than PyTorch's `.bin` pickle format — no arbitrary code execution risk during loading.
