@@ -786,9 +786,9 @@ print("="*70)
 # Note: Customize these test queries based on your domain
 
 test_queries = [
-    "What is the syntax for function declaration in C?",
-    "Write a program to demonstrate for loops",
-    "Explain malloc()",
+    "Give mary malloy's basic details",
+    "Which patient had type 2 diabetes?",
+    "Give medication summary for mary malloy",
 ]
 
 print("="*70)
