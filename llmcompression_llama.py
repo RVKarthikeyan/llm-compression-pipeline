@@ -335,7 +335,7 @@ def generate_questions_from_content(text_chunks, questions_per_chunk=3):
 
     # We sample chunks to ensure broad coverage without extreme runtime
     # Stride of 2 gives good variety
-    sampled_chunks = text_chunks[::2]
+    sampled_chunks = text_chunks
 
     print(f"Generating questions from {len(sampled_chunks)} content chunks...")
 
@@ -594,19 +594,16 @@ print(f"   Evaluation set: {len(eval_dataset)} examples")
 print(f"\nReady for LoRA configuration and fine-tuning")
 
 # Configure LoRA (Low-Rank Adaptation) for efficient fine-tuning
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig
 
 print("="*70)
 print("Configuring LoRA for Efficient Training")
 print("="*70)
 
-# Prepare model for k-bit training
-llama_model = prepare_model_for_kbit_training(llama_model)
-
 # LoRA configuration - targets important attention layers
 lora_config = LoraConfig(
-    r=16,  # LoRA rank (higher = more parameters but better quality)
-    lora_alpha=32,  # LoRA alpha scaling
+    r=32,  # LoRA rank (higher = more parameters but better quality)
+    lora_alpha=64,  # LoRA alpha scaling
     target_modules=[
         "q_proj",
         "k_proj",
@@ -621,20 +618,8 @@ lora_config = LoraConfig(
     task_type="CAUSAL_LM"
 )
 
-# Apply LoRA to model
-llama_model = get_peft_model(llama_model, lora_config)
-
-# Print trainable parameters
-trainable_params = sum(p.numel() for p in llama_model.parameters() if p.requires_grad)
-total_params = sum(p.numel() for p in llama_model.parameters())
-trainable_percent = 100 * trainable_params / total_params
-
-print(f"LoRA applied successfully")
-print(f"\nModel Parameters:")
-print(f"   Total parameters: {total_params:,}")
-print(f"   Trainable parameters: {trainable_params:,}")
-print(f"   Trainable: {trainable_percent:.2f}%")
-print(f"\nOnly training {trainable_percent:.1f}% of parameters (parameter-efficient fine-tuning)")
+print(f"LoRA configuration defined")
+print(f"   LoRA will be applied by SFTTrainer during training setup")
 
 # Configure training with SFTTrainer (Supervised Fine-Tuning)
 from transformers import TrainingArguments
@@ -647,7 +632,7 @@ print("="*70)
 # Training configuration
 training_args = TrainingArguments(
     output_dir="./llama-chat-domain",
-    num_train_epochs=3,
+    num_train_epochs=15,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=4,
     gradient_checkpointing=True,
@@ -712,7 +697,6 @@ print(f"   Teacher: Llama 3.1 8B")
 print(f"   Training samples: {len(train_dataset)}")
 print(f"   Evaluation samples: {len(eval_dataset)}")
 print(f"   LoRA rank: {lora_config.r}")
-print(f"   Trainable params: {trainable_percent:.2f}%")
 
 # ## Step 3: Model Evaluation and Testing
 #
