@@ -16,7 +16,6 @@ Prerequisites (must already be installed):
 import os
 import logging
 import subprocess
-import sys
 import time
 
 logger = logging.getLogger(__name__)
@@ -26,6 +25,7 @@ def run_mixed_precision_export(
     model_path: str,
     output_dir: str,
     hf_token: str | None = None,
+    pte_venv: str | None = None,
     recipe: str = "xnnpack",
     qlinear: str = "8da4w",
     qembedding: str = "8w",
@@ -42,6 +42,11 @@ def run_mixed_precision_export(
     hf_token : str or None
         HuggingFace token.  Required for gated models.  Set in the
         subprocess environment as ``HF_TOKEN``.
+    pte_venv : str or None
+        Path to the PTE virtual environment root (e.g. ``".venv_pte"``).
+        When provided, the ``optimum-cli`` binary inside that venv is used.
+        Falls back to the ``PTE_VENV`` environment variable, then to
+        bare ``optimum-cli`` on the current PATH.
     recipe : str
         ExecuTorch backend recipe (default ``"xnnpack"`` for ARM CPU).
     qlinear : str
@@ -67,8 +72,20 @@ def run_mixed_precision_export(
     """
     os.makedirs(output_dir, exist_ok=True)
 
+    # Resolve the optimum-cli binary from the PTE venv
+    venv_root = pte_venv or os.environ.get("PTE_VENV")
+    if venv_root:
+        optimum_cli = os.path.join(os.path.abspath(venv_root), "bin", "optimum-cli")
+        if not os.path.isfile(optimum_cli):
+            raise FileNotFoundError(
+                f"optimum-cli not found at {optimum_cli}. "
+                "Run setup.sh to create the PTE venv."
+            )
+    else:
+        optimum_cli = "optimum-cli"
+
     cmd = (
-        f'optimum-cli export executorch'
+        f'"{optimum_cli}" export executorch'
         f' --model "{model_path}"'
         f' --task "text-generation"'
         f' --recipe "{recipe}"'
@@ -82,6 +99,11 @@ def run_mixed_precision_export(
     env = os.environ.copy()
     if hf_token:
         env["HF_TOKEN"] = hf_token
+    # Ensure the PTE venv's bin is first on PATH so linked libraries resolve
+    if venv_root:
+        venv_bin = os.path.join(os.path.abspath(venv_root), "bin")
+        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+        env["VIRTUAL_ENV"] = os.path.abspath(venv_root)
 
     t0 = time.time()
 

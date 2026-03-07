@@ -16,6 +16,7 @@ app = FastAPI(title="Llama Model Compression Pipeline API")
 # Configuration
 BASE_DIR = Path("workspace")
 TARGET_REPO_NAME = "compressed_models"
+PTE_VENV = Path(__file__).resolve().parent / ".venv_pte"  # created by setup.sh
 
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -100,6 +101,7 @@ def run_pipeline(hf_token: str, hashed_token: str, pdf_path: str):
             model_path=kd_model_dir,
             output_dir=pte_output_dir,
             hf_token=hf_token,
+            pte_venv=str(PTE_VENV),
         )
 
         pte_path = pte_result["pte_path"]
