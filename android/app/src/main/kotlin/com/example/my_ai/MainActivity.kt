@@ -288,6 +288,12 @@ class MainActivity : FlutterActivity() {
                             }
                             outputBuilder.append(token)
                             tokenCount++
+
+                            // Stream token to Dart UI in real-time
+                            mainHandler.post {
+                                try { flutterChannel?.invokeMethod("onToken", token) } catch (_: Exception) {}
+                            }
+
                             if (tokenCount <= 5 || tokenCount % 20 == 0) {
                                 log("Token $tokenCount: \"${token.replace("\n", "\\n")}\"")
                             }

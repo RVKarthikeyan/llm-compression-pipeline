@@ -197,15 +197,38 @@ class ChatState {
 class ChatNotifier extends Notifier<ChatState> {
   static const _channel = MethodChannel('com.example.my_ai/executorch');
 
+  /// Accumulates streamed tokens during inference.
+  final StringBuffer _streamBuffer = StringBuffer();
+
   @override
   ChatState build() {
-    // Listen for native log messages so they appear in flutter run console
+    // Listen for native log messages and streamed tokens
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'log') {
         debugPrint('[NATIVE] ${call.arguments}');
+      } else if (call.method == 'onToken') {
+        _onStreamedToken(call.arguments as String);
       }
     });
     return const ChatState();
+  }
+
+  /// Called for each token streamed from native side.
+  void _onStreamedToken(String token) {
+    _streamBuffer.write(token);
+    final partial = _cleanSpecialTokens(_streamBuffer.toString());
+
+    // Update the last message (the AI placeholder) in-place
+    final msgs = [...state.messages];
+    if (msgs.isNotEmpty && msgs.last.role == 'ai') {
+      msgs[msgs.length - 1] = ChatMessage(
+        role: 'ai',
+        content: partial,
+        ragContext: msgs.last.ragContext,
+        noContextWarning: msgs.last.noContextWarning,
+      );
+      state = state.copyWith(messages: msgs);
+    }
   }
 
   Future<void> sendMessage(String userText) async {
@@ -246,6 +269,20 @@ class ChatNotifier extends Notifier<ChatState> {
 
     String aiResponse;
     bool usedNative = false;
+
+    // Add an empty AI placeholder for streaming — tokens will fill it
+    _streamBuffer.clear();
+    state = state.copyWith(
+      messages: [
+        ...state.messages,
+        ChatMessage(
+          role: 'ai',
+          content: '',
+          ragContext: hasContext ? contextChunks : null,
+          noContextWarning: !hasContext,
+        ),
+      ],
+    );
 
     debugPrint('[CHAT] Sending to native: prompt="$userText", hasContext=$hasContext');
 
@@ -288,16 +325,18 @@ class ChatNotifier extends Notifier<ChatState> {
           Duration(milliseconds: 300 + Random().nextInt(500)));
     }
 
+    // Finalize the AI placeholder with the complete response
+    final msgs = [...state.messages];
+    if (msgs.isNotEmpty && msgs.last.role == 'ai') {
+      msgs[msgs.length - 1] = ChatMessage(
+        role: 'ai',
+        content: aiResponse,
+        ragContext: hasContext ? contextChunks : null,
+        noContextWarning: !hasContext,
+      );
+    }
     state = state.copyWith(
-      messages: [
-        ...state.messages,
-        ChatMessage(
-          role: 'ai',
-          content: aiResponse,
-          ragContext: contextChunks,
-          noContextWarning: !hasContext,
-        ),
-      ],
+      messages: msgs,
       isInferencing: false,
     );
   }

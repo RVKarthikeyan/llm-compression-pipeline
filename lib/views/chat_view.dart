@@ -310,8 +310,13 @@ class _ChatViewState extends ConsumerState<ChatView>
                         padding: const EdgeInsets.symmetric(
                             horizontal: 14, vertical: 8),
                         itemCount: chat.messages.length,
-                        itemBuilder: (_, i) =>
-                            _Bubble(message: chat.messages[i]),
+                        itemBuilder: (_, i) {
+                          // Auto-scroll when the last message is being streamed
+                          if (i == chat.messages.length - 1 && chat.isInferencing) {
+                            _scrollToBottom();
+                          }
+                          return _Bubble(message: chat.messages[i]);
+                        },
                       ),
               ),
 
@@ -330,7 +335,7 @@ class _ChatViewState extends ConsumerState<ChatView>
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Text('Thinking…',
+                    Text('Generating…',
                         style: TextStyle(
                             fontSize: 12, color: Colors.grey.shade500)),
                   ]),
