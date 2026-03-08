@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import pytesseract
+import wandb
 from pdf2image import convert_from_path
 from tqdm import tqdm
 from huggingface_hub import login
@@ -359,7 +360,8 @@ def run_knowledge_distillation(
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
         push_to_hub=False,
-        report_to="none",
+        report_to="wandb",
+        run_name="knowledge-distillation",
     )
 
     trainer = SFTTrainer(
@@ -371,11 +373,25 @@ def run_knowledge_distillation(
     )
 
     logger.info("Starting student fine-tuning (%d epochs)...", num_train_epochs)
+    wandb.init(
+        project="llm-compression",
+        name="knowledge-distillation",
+        config={
+            "stage": "knowledge_distillation",
+            "teacher_model": teacher_model_name,
+            "student_model": student_model_name,
+            "num_train_epochs": num_train_epochs,
+            "num_training_examples": len(training_data),
+            "max_questions": max_questions,
+            "seed": seed,
+        },
+    )
     trainer.train()
 
     adapter_path = os.path.join(output_dir, "llama-chat-final")
     trainer.model.save_pretrained(adapter_path)
     student_tokenizer.save_pretrained(adapter_path)
+    wandb.finish()
 
     # ------------------------------------------------------------------
     # 6. Merge LoRA adapters into the student base model

@@ -17,6 +17,7 @@ from typing import List, Tuple
 
 import torch
 import torch.nn as nn
+import wandb
 from huggingface_hub import login
 from transformers import (
     AutoTokenizer,
@@ -235,7 +236,8 @@ def run_pruning_pipeline(
         save_steps=100,
         warmup_steps=100,
         save_total_limit=2,
-        report_to="none",
+        report_to="wandb",
+        run_name="pruning-lora-healing",
         optim="adamw_torch",
         lr_scheduler_type="cosine",
     )
@@ -250,7 +252,25 @@ def run_pruning_pipeline(
     )
 
     logger.info("Starting LoRA healing (%d epochs)...", num_train_epochs)
+    wandb.init(
+        project="llm-compression",
+        name="pruning-lora-healing",
+        config={
+            "stage": "pruning_healing",
+            "model_name": model_name,
+            "layers_to_merge": layers_to_merge,
+            "lora_r": lora_r,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": lora_dropout,
+            "num_train_epochs": num_train_epochs,
+            "learning_rate": learning_rate,
+            "max_seq_length": max_seq_length,
+            "num_layers_original": original_layers,
+            "num_layers_pruned": pruned_layers,
+        },
+    )
     trainer.train()
+    wandb.finish()
 
     logger.info("Saving LoRA adapters to %s", lora_dir)
     model.save_pretrained(lora_dir)

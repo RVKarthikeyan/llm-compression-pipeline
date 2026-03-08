@@ -149,14 +149,16 @@ def run_pipeline(hf_token: str, hashed_token: str, pdf_path: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/auth")
-async def authenticate(hf_token: str = Form(...)):
-    """Validate the HF token and create a workspace folder for the user."""
+async def authenticate(hf_token: str = Form(...), wandb_api_key: str = Form(...)):
+    """Validate the HF token, set the W&B API key, and create a workspace folder."""
     try:
         api = HfApi(token=hf_token)
         user_info = api.whoami()
         username = user_info["name"]
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid Hugging Face token.")
+
+    os.environ["WANDB_API_KEY"] = wandb_api_key
 
     hashed = hash_token(hf_token)
     get_user_dir(hashed)
