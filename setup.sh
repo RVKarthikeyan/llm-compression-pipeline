@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_MAIN="$SCRIPT_DIR/.venv_main"
 VENV_PTE="$SCRIPT_DIR/.venv_pte"
-NIGHTLY_INDEX="https://download.pytorch.org/whl/nightly/cpu"
+# NIGHTLY_INDEX="https://download.pytorch.org/whl/nightly/cpu"
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 info()  { printf "\n\033[1;34m=> %s\033[0m\n" "$*"; }
@@ -63,39 +63,42 @@ ok "Main venv ready: $VENV_MAIN"
 info "Creating PTE venv at $VENV_PTE"
 
 python3 -m venv "$VENV_PTE"
-"$VENV_PTE/bin/pip" install --upgrade pip setuptools wheel -q
+# "$VENV_PTE/bin/pip" install --upgrade pip setuptools wheel -q
 
 # Step 1: Pre-install executorch's PyPI dependencies
 #         (the nightly index doesn't host these, causing resolver failures)
-info "Installing executorch PyPI dependencies"
-"$VENV_PTE/bin/pip" install --no-cache-dir \
-    "coremltools==9.0" \
-    "mpmath==1.3.0" \
-    expecttest flatbuffers hypothesis kgb \
-    parameterized "pytest<9.0" pytest-xdist "pytest-rerunfailures==15.1" \
-    pytest-json-report pytorch-tokenizers ruamel.yaml tabulate \
-    hydra-core omegaconf pandas "scikit-learn>=1.5"
+# info "Installing executorch PyPI dependencies"
+# "$VENV_PTE/bin/pip" install --no-cache-dir \
+#     "coremltools==9.0" \
+#     "mpmath==1.3.0" \
+#     expecttest flatbuffers hypothesis kgb \
+#     parameterized "pytest<9.0" pytest-xdist "pytest-rerunfailures==15.1" \
+#     pytest-json-report pytorch-tokenizers ruamel.yaml tabulate \
+#     hydra-core omegaconf pandas "scikit-learn>=1.5"
 
 # Step 2: torch nightly (CPU – no CUDA needed for export)
-info "Installing torch nightly (CPU)"
-"$VENV_PTE/bin/pip" install --no-cache-dir --pre torch --index-url "$NIGHTLY_INDEX"
+# info "Installing torch nightly (CPU)"
+# "$VENV_PTE/bin/pip" install --no-cache-dir --pre torch --index-url "$NIGHTLY_INDEX"
 
-# Step 3: torchao nightly (must match torch version)
-info "Installing torchao nightly"
-"$VENV_PTE/bin/pip" install --no-cache-dir --pre torchao --index-url "$NIGHTLY_INDEX"
+# # Step 3: torchao nightly (must match torch version)
+# info "Installing torchao nightly"
+# "$VENV_PTE/bin/pip" install --no-cache-dir --pre torchao --index-url "$NIGHTLY_INDEX"
 
-# Step 4: executorch nightly (--no-deps to skip nightly-index-only resolution)
-info "Installing executorch nightly"
-"$VENV_PTE/bin/pip" install --no-cache-dir --no-deps --pre executorch --index-url "$NIGHTLY_INDEX"
+# # Step 4: executorch nightly (--no-deps to skip nightly-index-only resolution)
+# info "Installing executorch nightly"
+# "$VENV_PTE/bin/pip" install --no-cache-dir --no-deps --pre executorch --index-url "$NIGHTLY_INDEX"
 
 # Step 5: optimum-executorch (--no-deps – its version pins are too strict)
 info "Installing optimum-executorch"
-"$VENV_PTE/bin/pip" install --no-cache-dir --no-deps optimum-executorch
+git clone https://github.com/huggingface/optimum-executorch.git
+cd optimum-executorch
+
+"$VENV_PTE/bin/pip" install '.[dev]'
 
 # Step 6: HuggingFace stack (accelerate with --no-deps to avoid pulling CUDA torch)
-info "Installing HuggingFace stack"
-"$VENV_PTE/bin/pip" install -q -U transformers tokenizers sentencepiece huggingface_hub optimum
-"$VENV_PTE/bin/pip" install -q --no-deps accelerate
+# info "Installing HuggingFace stack"
+# "$VENV_PTE/bin/pip" install -q -U transformers tokenizers sentencepiece huggingface_hub optimum
+# "$VENV_PTE/bin/pip" install -q --no-deps accelerate
 
 ok "PTE venv ready: $VENV_PTE"
 
