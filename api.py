@@ -40,7 +40,7 @@ def get_user_dir(hashed_token: str) -> Path:
 # Background pipeline: pruning -> KD -> mixed-precision PTE -> upload
 # ---------------------------------------------------------------------------
 
-def run_pipeline(hf_token: str, hashed_token: str, pdf_path: str):
+def run_pipeline(hf_token: str, hashed_token: str, pdf_path: str, job_id: str):
     """Orchestrate the full compression pipeline.
 
     Steps
@@ -50,7 +50,8 @@ def run_pipeline(hf_token: str, hashed_token: str, pdf_path: str):
        training data from the PDF, then fine-tunes the *pruned* student.
     3. **Mixed-Precision PTE Export** – 8da4w + 8w quantisation via
        ExecuTorch / XNNPACK.
-    4. **Upload** – Push the ``.pte`` file to a private HuggingFace repo.
+    4. **Upload** – Push the contents of the pte_output directory to a
+       private HuggingFace repo under a folder named by job id.
     """
     user_dir = get_user_dir(hashed_token)
     job = job_store[hashed_token]
@@ -121,17 +122,16 @@ def run_pipeline(hf_token: str, hashed_token: str, pdf_path: str):
             exist_ok=True,
         )
 
-        pte_filename = os.path.basename(pte_path)
-        api.upload_file(
-            path_or_fileobj=pte_path,
-            path_in_repo=pte_filename,
+        api.upload_folder(
+            folder_path=pte_output_dir,
+            path_in_repo=job_id,
             repo_id=repo_id,
             repo_type="model",
         )
 
         job["status"] = "completed"
         job["message"] = (
-            f"Pipeline complete. PTE uploaded to {repo_id}/{pte_filename} "
+            f"Pipeline complete. PTE output uploaded to {repo_id}/{job_id}/ "
             f"({pte_result['size_mb']:.1f} MB). "
             f"Layers: {pruning_result['num_layers_original']} -> "
             f"{pruning_result['num_layers_pruned']}. "
@@ -227,7 +227,7 @@ async def trigger_pipeline(
         "pte_path": None,
     }
 
-    background_tasks.add_task(run_pipeline, hf_token, hashed, pdf_path)
+    background_tasks.add_task(run_pipeline, hf_token, hashed, pdf_path, job_id)
 
     return {
         "status": "accepted",

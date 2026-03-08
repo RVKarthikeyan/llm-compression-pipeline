@@ -148,7 +148,7 @@ def run_pruning_pipeline(
         ``num_layers_pruned``      – layer count after collapse.
     """
     if layers_to_merge is None:
-        layers_to_merge = [(2, 3), (7, 8)]
+        layers_to_merge = [(11, 12)]
 
     os.makedirs(output_dir, exist_ok=True)
     login(token=hf_token, add_to_git_credential=False)
