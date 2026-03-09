@@ -159,6 +159,7 @@ async def authenticate(hf_token: str = Form(...), wandb_api_key: str = Form(...)
         raise HTTPException(status_code=401, detail="Invalid Hugging Face token.")
 
     os.environ["WANDB_API_KEY"] = wandb_api_key
+    os.environ["WANDB_ENTITY"] = "gjk-pipeline"
 
     hashed = hash_token(hf_token)
     get_user_dir(hashed)
