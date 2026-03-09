@@ -30,6 +30,7 @@ info "Checking system dependencies"
 missing=()
 command -v tesseract >/dev/null 2>&1 || missing+=(tesseract-ocr)
 command -v pdftoppm  >/dev/null 2>&1 || missing+=(poppler-utils)
+command -v flatc  >/dev/null 2>&1 || missing+=(flatbuffers-compiler)
 command -v python3   >/dev/null 2>&1 || missing+=(python3)
 
 if [ ${#missing[@]} -gt 0 ]; then
@@ -45,7 +46,7 @@ if [ ${#missing[@]} -gt 0 ]; then
         warn "Skipping – some pipeline steps may fail without these packages"
     fi
 else
-    ok "tesseract, poppler-utils, python3 found"
+    ok "tesseract, poppler-utils, python3, flatc found"
 fi
 
 # ── venv_main: API + Pruning + Knowledge Distillation ─────────────────────
