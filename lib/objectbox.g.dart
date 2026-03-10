@@ -22,7 +22,7 @@ final _entities = <obx_int.ModelEntity>[
   obx_int.ModelEntity(
     id: const obx_int.IdUid(1, 5504673398668687470),
     name: 'DocumentChunk',
-    lastPropertyId: const obx_int.IdUid(2, 6558628495994844213),
+    lastPropertyId: const obx_int.IdUid(3, 6284352117889429357),
     flags: 0,
     properties: <obx_int.ModelProperty>[
       obx_int.ModelProperty(
@@ -36,6 +36,14 @@ final _entities = <obx_int.ModelEntity>[
         name: 'text',
         type: 9,
         flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(3, 6284352117889429357),
+        name: 'embedding',
+        type: 28,
+        flags: 8,
+        indexId: const obx_int.IdUid(1, 4633238011653836467),
+        hnswParams: obx_int.ModelHnswParams(dimensions: 384, distanceType: 2),
       ),
     ],
     relations: <obx_int.ModelRelation>[],
@@ -87,7 +95,7 @@ obx_int.ModelDefinition getObjectBoxModel() {
     generatorVersion: obx_int.GeneratorVersion.v2025_12_16,
     entities: _entities,
     lastEntityId: const obx_int.IdUid(1, 5504673398668687470),
-    lastIndexId: const obx_int.IdUid(0, 0),
+    lastIndexId: const obx_int.IdUid(1, 4633238011653836467),
     lastRelationId: const obx_int.IdUid(0, 0),
     lastSequenceId: const obx_int.IdUid(0, 0),
     retiredEntityUids: const [],
@@ -110,9 +118,13 @@ obx_int.ModelDefinition getObjectBoxModel() {
       },
       objectToFB: (DocumentChunk object, fb.Builder fbb) {
         final textOffset = fbb.writeString(object.text);
-        fbb.startTable(3);
+        final embeddingOffset = object.embedding == null
+            ? null
+            : fbb.writeListFloat32(object.embedding!);
+        fbb.startTable(4);
         fbb.addInt64(0, object.id);
         fbb.addOffset(1, textOffset);
+        fbb.addOffset(2, embeddingOffset);
         fbb.finish(fbb.endTable());
         return object.id;
       },
@@ -128,7 +140,15 @@ obx_int.ModelDefinition getObjectBoxModel() {
         final textParam = const fb.StringReader(
           asciiOptimization: true,
         ).vTableGet(buffer, rootOffset, 6, '');
-        final object = DocumentChunk(id: idParam, text: textParam);
+        final embeddingParam = const fb.ListReader<double>(
+          fb.Float32Reader(),
+          lazy: false,
+        ).vTableGetNullable(buffer, rootOffset, 8);
+        final object = DocumentChunk(
+          id: idParam,
+          text: textParam,
+          embedding: embeddingParam,
+        );
 
         return object;
       },
@@ -148,5 +168,10 @@ class DocumentChunk_ {
   /// See [DocumentChunk.text].
   static final text = obx.QueryStringProperty<DocumentChunk>(
     _entities[0].properties[1],
+  );
+
+  /// See [DocumentChunk.embedding].
+  static final embedding = obx.QueryHnswProperty<DocumentChunk>(
+    _entities[0].properties[2],
   );
 }

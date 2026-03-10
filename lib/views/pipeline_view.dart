@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../providers/app_providers.dart';
 
@@ -38,42 +37,31 @@ class PipelineView extends ConsumerWidget {
   Future<void> _selectAndProcessPdf(BuildContext context, WidgetRef ref) async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['pdf', 'txt'],
+      allowedExtensions: ['pdf'],
     );
     if (result == null) return;
 
     final filePath = result.files.single.path!;
     final file = File(filePath);
 
-    // 1. Extract text
-    String content = '';
-    if (result.files.single.extension == 'pdf') {
-      final doc = PdfDocument(inputBytes: file.readAsBytesSync());
-      content = PdfTextExtractor(doc).extractText();
-      doc.dispose();
-    } else {
-      content = await file.readAsString();
-    }
+    // Upload PDF to backend /embed for chunking + embedding
+    try {
+      final hfToken = await ref.read(settingsProvider.future);
+      final backend = ref.read(backendServiceProvider);
+      final embedResponse = await backend.embedPdf(
+        hfToken: hfToken,
+        pdfFile: file,
+      );
 
-    // 2. Chunk & store in ObjectBox using smart chunking
-    await ref.read(objectBoxProvider).replaceChunksFromText(content);
+      // Store chunks + embeddings in ObjectBox
+      ref
+          .read(objectBoxProvider)
+          .replaceChunksFromEmbedResponse(embedResponse.chunks);
 
-    // Update pipeline state: mark PDF selected
-    ref.read(pipelineProvider.notifier).setPdfSelected(filePath);
-
-    // 3. Upload PDF to backend (mock)
-    final uploaded =
-        await ref.read(backendServiceProvider).uploadPdf(file);
-    if (!uploaded) {
-      ref.read(pipelineProvider.notifier).setError('PDF upload failed.');
-      return;
-    }
-    ref.read(pipelineProvider.notifier).setUploadComplete();
-
-    // 4. Poll backend (mock delay)
-    final ready = await ref.read(backendServiceProvider).pollModelReady();
-    if (ready) {
-      ref.read(pipelineProvider.notifier).setBackendReady();
+      // Update pipeline state: mark PDF selected
+      ref.read(pipelineProvider.notifier).setPdfSelected(filePath);
+    } catch (e) {
+      ref.read(pipelineProvider.notifier).setError('PDF embedding failed: $e');
     }
   }
 
@@ -113,12 +101,9 @@ class PipelineView extends ConsumerWidget {
                       const SizedBox(width: 8),
                       Text(
                         'Load Local .pte Model',
-                        style: Theme.of(context)
-                            .textTheme
-                            .titleSmall
-                            ?.copyWith(
-                              color: Theme.of(context).colorScheme.primary,
-                            ),
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
                       ),
                     ],
                   ),
@@ -153,8 +138,7 @@ class PipelineView extends ConsumerWidget {
                           ),
                         ),
                         TextButton(
-                          onPressed: () =>
-                              _loadLocalPteFile(context, ref),
+                          onPressed: () => _loadLocalPteFile(context, ref),
                           child: const Text('Change'),
                         ),
                       ],
@@ -188,7 +172,8 @@ class PipelineView extends ConsumerWidget {
                 ? '📄 ${pipeline.selectedPdfPath!.split(Platform.pathSeparator).last}'
                 : 'No document selected',
             child: FilledButton.icon(
-              onPressed: (status == PipelineStatus.idle ||
+              onPressed:
+                  (status == PipelineStatus.idle ||
                       status == PipelineStatus.modelLoaded)
                   ? () => _selectAndProcessPdf(context, ref)
                   : null,
@@ -226,9 +211,7 @@ class PipelineView extends ConsumerWidget {
                 children: [
                   if (status == PipelineStatus.downloading) ...[
                     const SizedBox(height: 8),
-                    LinearProgressIndicator(
-                      value: pipeline.downloadProgress,
-                    ),
+                    LinearProgressIndicator(value: pipeline.downloadProgress),
                     const SizedBox(height: 4),
                     Text(
                       '${(pipeline.downloadProgress * 100).toStringAsFixed(1)} %',
@@ -275,19 +258,19 @@ class PipelineView extends ConsumerWidget {
                       ),
                     )
                   : status == PipelineStatus.modelLoaded
-                      ? Row(
-                          children: const [
-                            Icon(Icons.memory, color: Colors.green),
-                            SizedBox(width: 8),
-                            Text('Model ready — head to Chat!'),
-                          ],
-                        )
-                      : FilledButton.icon(
-                          onPressed: () =>
-                              ref.read(pipelineProvider.notifier).loadModel(),
-                          icon: const Icon(Icons.memory_outlined),
-                          label: const Text('Load Model to Memory'),
-                        ),
+                  ? Row(
+                      children: const [
+                        Icon(Icons.memory, color: Colors.green),
+                        SizedBox(width: 8),
+                        Text('Model ready — head to Chat!'),
+                      ],
+                    )
+                  : FilledButton.icon(
+                      onPressed: () =>
+                          ref.read(pipelineProvider.notifier).loadModel(),
+                      icon: const Icon(Icons.memory_outlined),
+                      label: const Text('Load Model to Memory'),
+                    ),
             ),
 
           // ── Error banner ────────────────────────────────────────────────
@@ -350,21 +333,19 @@ class _StepCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 10),
-                Text(title,
-                    style: Theme.of(context).textTheme.titleSmall),
+                Text(title, style: Theme.of(context).textTheme.titleSmall),
               ],
             ),
             const SizedBox(height: 4),
             Padding(
               padding: const EdgeInsets.only(left: 34),
-              child: Text(subtitle,
-                  style: Theme.of(context).textTheme.bodySmall),
+              child: Text(
+                subtitle,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ),
             const SizedBox(height: 12),
-            Padding(
-              padding: const EdgeInsets.only(left: 34),
-              child: child,
-            ),
+            Padding(padding: const EdgeInsets.only(left: 34), child: child),
           ],
         ),
       ),

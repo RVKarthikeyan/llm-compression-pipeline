@@ -17,8 +17,9 @@ final objectBoxProvider = Provider<ObjectBoxService>((ref) {
   throw UnimplementedError('objectBoxProvider must be overridden in main()');
 });
 
-final backendServiceProvider =
-    Provider<BackendService>((_) => BackendService());
+final backendServiceProvider = Provider<BackendService>(
+  (_) => BackendService(),
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Secure Storage (HF Token)
@@ -31,8 +32,7 @@ const _backendUrlKey = 'backend_url';
 
 class SettingsNotifier extends AsyncNotifier<String> {
   @override
-  Future<String> build() async =>
-      await _storage.read(key: _hfTokenKey) ?? '';
+  Future<String> build() async => await _storage.read(key: _hfTokenKey) ?? '';
 
   Future<void> saveToken(String token) async {
     await _storage.write(key: _hfTokenKey, value: token);
@@ -40,8 +40,9 @@ class SettingsNotifier extends AsyncNotifier<String> {
   }
 }
 
-final settingsProvider =
-    AsyncNotifierProvider<SettingsNotifier, String>(SettingsNotifier.new);
+final settingsProvider = AsyncNotifierProvider<SettingsNotifier, String>(
+  SettingsNotifier.new,
+);
 
 /// Stores the W&B API key in secure storage.
 final wandbKeyProvider = FutureProvider<String>((ref) async {
@@ -74,8 +75,8 @@ enum ModelLoadState { idle, loading, loaded, error }
 class ModelState {
   final ModelLoadState loadState;
   final String? modelPath;
-  final String? vocabPath;      // *_vocab.json
-  final String? configPath;     // *_tokenizer_config.json
+  final String? vocabPath; // *_vocab.json
+  final String? configPath; // *_tokenizer_config.json
   final String? statusMessage;
   final bool hasTokenizer;
 
@@ -95,15 +96,14 @@ class ModelState {
     String? configPath,
     String? statusMessage,
     bool? hasTokenizer,
-  }) =>
-      ModelState(
-        loadState: loadState ?? this.loadState,
-        modelPath: modelPath ?? this.modelPath,
-        vocabPath: vocabPath ?? this.vocabPath,
-        configPath: configPath ?? this.configPath,
-        statusMessage: statusMessage ?? this.statusMessage,
-        hasTokenizer: hasTokenizer ?? this.hasTokenizer,
-      );
+  }) => ModelState(
+    loadState: loadState ?? this.loadState,
+    modelPath: modelPath ?? this.modelPath,
+    vocabPath: vocabPath ?? this.vocabPath,
+    configPath: configPath ?? this.configPath,
+    statusMessage: statusMessage ?? this.statusMessage,
+    hasTokenizer: hasTokenizer ?? this.hasTokenizer,
+  );
 
   bool get isLoaded => loadState == ModelLoadState.loaded;
   bool get isLoading => loadState == ModelLoadState.loading;
@@ -152,7 +152,8 @@ class ModelNotifier extends Notifier<ModelState> {
 
       debugPrint('[MODEL] Load result: $result');
 
-      final hasTok = result != null &&
+      final hasTok =
+          result != null &&
           !result.contains('no_tokenizer') &&
           !result.contains('demo');
 
@@ -185,8 +186,9 @@ class ModelNotifier extends Notifier<ModelState> {
   void clearModel() => state = const ModelState();
 }
 
-final modelProvider =
-    NotifierProvider<ModelNotifier, ModelState>(ModelNotifier.new);
+final modelProvider = NotifierProvider<ModelNotifier, ModelState>(
+  ModelNotifier.new,
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chat state
@@ -263,19 +265,62 @@ class ChatNotifier extends Notifier<ChatState> {
     if (chunk.length <= maxLen) return chunk;
 
     const trimStopwords = {
-      'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'have',
-      'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
-      'may', 'might', 'can', 'for', 'and', 'but', 'not', 'with', 'from',
-      'about', 'into', 'what', 'which', 'who', 'how', 'why', 'when', 'where',
-      'this', 'that', 'these', 'those', 'its', 'his', 'her', 'our', 'their',
+      'the',
+      'a',
+      'an',
+      'is',
+      'are',
+      'was',
+      'were',
+      'be',
+      'been',
+      'have',
+      'has',
+      'had',
+      'do',
+      'does',
+      'did',
+      'will',
+      'would',
+      'could',
+      'should',
+      'may',
+      'might',
+      'can',
+      'for',
+      'and',
+      'but',
+      'not',
+      'with',
+      'from',
+      'about',
+      'into',
+      'what',
+      'which',
+      'who',
+      'how',
+      'why',
+      'when',
+      'where',
+      'this',
+      'that',
+      'these',
+      'those',
+      'its',
+      'his',
+      'her',
+      'our',
+      'their',
     };
 
-    final queryWords = query.toLowerCase()
+    final queryWords = query
+        .toLowerCase()
         .split(RegExp(r'\s+'))
         .where((w) => w.length > 2 && !trimStopwords.contains(w))
         .toSet();
 
-    final sentences = chunk.split(RegExp(r'(?<=[.!?\n])[\s]*'))
+    final sentences = chunk
+        .split(RegExp(r'(?<=[.!?\n])[\s]*'))
         .where((s) => s.trim().length > 5)
         .toList();
 
@@ -333,21 +378,37 @@ class ChatNotifier extends Notifier<ChatState> {
       isInferencing: true,
     );
 
-    // RAG: retrieve context from ObjectBox
+    // RAG: retrieve context from ObjectBox using vector search
     final obs = ref.read(objectBoxProvider);
     final totalChunks = obs.count;
     debugPrint('[RAG] ObjectBox has $totalChunks chunks');
 
-    // Always score chunks by relevance to the query using n-gram + entity matching.
-    // For small docs (≤30 chunks), score ALL chunks so we don't miss anything.
-    // For larger docs, use DB-level keyword pre-filter first.
-    List<String> contextChunks;
-    if (totalChunks > 0 && totalChunks <= 30) {
-      contextChunks = obs.scoredSearchAll(userText, limit: 5);
-      debugPrint('[RAG] Scored ALL $totalChunks chunks → ${contextChunks.length} selected');
-    } else {
-      contextChunks = obs.searchContext(userText, limit: 4);
-      debugPrint('[RAG] DB search → ${contextChunks.length} chunks');
+    List<String> contextChunks = [];
+    if (totalChunks > 0 && obs.hasEmbeddings) {
+      // Embed the query locally via ONNX on native side
+      try {
+        final queryEmbedding = await _channel.invokeMethod<List<dynamic>>(
+          'embedQuery',
+          {'text': userText},
+        );
+        if (queryEmbedding != null) {
+          final vec = queryEmbedding.map((e) => (e as num).toDouble()).toList();
+          contextChunks = obs.searchByVector(vec, limit: 5);
+          debugPrint('[RAG] Vector search → ${contextChunks.length} chunks');
+        } else {
+          debugPrint('[RAG] embedQuery returned null');
+        }
+      } on PlatformException catch (e) {
+        debugPrint('[RAG] embedQuery failed: ${e.message}');
+      } on MissingPluginException {
+        debugPrint('[RAG] embedQuery not available (no native plugin)');
+      }
+    } else if (totalChunks > 0) {
+      // Chunks exist but have no embeddings — return first few as fallback
+      contextChunks = obs.getSampleChunks(n: 5);
+      debugPrint(
+        '[RAG] No embeddings, using first $totalChunks chunks as fallback',
+      );
     }
     final hasContext = contextChunks.isNotEmpty;
 
@@ -378,7 +439,11 @@ class ChatNotifier extends Notifier<ChatState> {
               : existing;
           // Find the longest suffix of existing text that matches a prefix of toAdd
           int bestOverlap = 0;
-          for (int len = 50; len <= overlapCheck.length && len <= toAdd.length; len++) {
+          for (
+            int len = 50;
+            len <= overlapCheck.length && len <= toAdd.length;
+            len++
+          ) {
             if (overlapCheck.endsWith(toAdd.substring(0, len))) {
               bestOverlap = len;
             }
@@ -401,8 +466,12 @@ class ChatNotifier extends Notifier<ChatState> {
         usedChunks.add(chunk);
       }
       ctx = buf.toString();
-      debugPrint('[RAG] Context: ${ctx.length} chars, ${usedChunks.length} chunks used');
-      debugPrint('[RAG] Preview: ${ctx.substring(0, ctx.length < 200 ? ctx.length : 200)}');
+      debugPrint(
+        '[RAG] Context: ${ctx.length} chars, ${usedChunks.length} chunks used',
+      );
+      debugPrint(
+        '[RAG] Preview: ${ctx.substring(0, ctx.length < 200 ? ctx.length : 200)}',
+      );
     } else {
       debugPrint('[RAG] NO context found!');
     }
@@ -424,24 +493,25 @@ class ChatNotifier extends Notifier<ChatState> {
       ],
     );
 
-    debugPrint('[CHAT] Sending to native: prompt="$userText", hasContext=$hasContext');
+    debugPrint(
+      '[CHAT] Sending to native: prompt="$userText", hasContext=$hasContext',
+    );
 
     try {
-      aiResponse = await _channel.invokeMethod<String>(
-            'runInference',
-            {
-              'prompt': userText,
-              'context': ctx,
-            },
-          )
-          .timeout(
-            const Duration(seconds: 900),
-            onTimeout: () {
-              debugPrint('[CHAT] Inference timed out after 900s');
-              return '(Inference timed out — model may be too slow on this device. '
-                  'Try a simpler prompt.)';
-            },
-          ) ??
+      aiResponse =
+          await _channel
+              .invokeMethod<String>('runInference', {
+                'prompt': userText,
+                'context': ctx,
+              })
+              .timeout(
+                const Duration(seconds: 900),
+                onTimeout: () {
+                  debugPrint('[CHAT] Inference timed out after 900s');
+                  return '(Inference timed out — model may be too slow on this device. '
+                      'Try a simpler prompt.)';
+                },
+              ) ??
           '(no response)';
       usedNative = true;
       debugPrint('[CHAT] Native response: ${aiResponse.length} chars');
@@ -461,8 +531,7 @@ class ChatNotifier extends Notifier<ChatState> {
 
     // Small delay for demo mode so it feels natural
     if (!usedNative) {
-      await Future.delayed(
-          Duration(milliseconds: 300 + Random().nextInt(500)));
+      await Future.delayed(Duration(milliseconds: 300 + Random().nextInt(500)));
     }
 
     // Finalize the AI placeholder with the complete response
@@ -475,10 +544,7 @@ class ChatNotifier extends Notifier<ChatState> {
         noContextWarning: !hasContext,
       );
     }
-    state = state.copyWith(
-      messages: msgs,
-      isInferencing: false,
-    );
+    state = state.copyWith(messages: msgs, isInferencing: false);
   }
 
   String _demo(String query, List<String> chunks, String? error) {
@@ -495,11 +561,16 @@ class ChatNotifier extends Notifier<ChatState> {
   }
 
   static const _specialTokens = [
-    '<|begin_of_text|>', '<|end_of_text|>',
-    '<|start_header_id|>', '<|end_header_id|>',
-    '<|eot_id|>', '<|finetune_right_pad_id|>',
-    '<bos>', '<eos>',
-    '<start_of_turn>', '<end_of_turn>',
+    '<|begin_of_text|>',
+    '<|end_of_text|>',
+    '<|start_header_id|>',
+    '<|end_header_id|>',
+    '<|eot_id|>',
+    '<|finetune_right_pad_id|>',
+    '<bos>',
+    '<eos>',
+    '<start_of_turn>',
+    '<end_of_turn>',
   ];
 
   String _cleanSpecialTokens(String text) {
@@ -519,5 +590,6 @@ class ChatNotifier extends Notifier<ChatState> {
   }
 }
 
-final chatProvider =
-    NotifierProvider<ChatNotifier, ChatState>(ChatNotifier.new);
+final chatProvider = NotifierProvider<ChatNotifier, ChatState>(
+  ChatNotifier.new,
+);

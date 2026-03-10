@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../providers/app_providers.dart';
 
@@ -57,11 +56,12 @@ class _ChatViewState extends ConsumerState<ChatView>
     _scrollToBottom();
   }
 
-  /// Pick a PDF and load it into the knowledge base for RAG.
+  /// Pick a PDF and upload it to the backend for embedding, then store
+  /// chunks + vectors in ObjectBox for HNSW search.
   Future<void> _selectKnowledge() async {
     final res = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['pdf', 'txt'],
+      allowedExtensions: ['pdf'],
       dialogTitle: 'Select Knowledge PDF',
     );
     if (res == null) return;
@@ -69,31 +69,56 @@ class _ChatViewState extends ConsumerState<ChatView>
     final file = File(res.files.single.path!);
     final fileName = res.files.single.name;
 
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Uploading PDF and generating embeddings…'),
+        duration: Duration(seconds: 30),
+      ),
+    );
+
     try {
-      String text;
-      if (fileName.toLowerCase().endsWith('.pdf')) {
-        final doc = PdfDocument(inputBytes: file.readAsBytesSync());
-        text = PdfTextExtractor(doc).extractText();
-        doc.dispose();
-      } else {
-        text = await file.readAsString();
+      // Read HF token for backend auth
+      final hfToken = await ref.read(settingsProvider.future);
+      if (hfToken.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Set your HuggingFace token in Settings first.'),
+          ),
+        );
+        return;
       }
 
+      // Upload PDF to backend /embed endpoint
+      final backend = ref.read(backendServiceProvider);
+      final embedResponse = await backend.embedPdf(
+        hfToken: hfToken,
+        pdfFile: file,
+      );
+
+      // Store chunks + embeddings in ObjectBox
       final obs = ref.read(objectBoxProvider);
-      await obs.replaceChunksFromText(text);
+      obs.replaceChunksFromEmbedResponse(embedResponse.chunks);
 
       if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Loaded "$fileName" — ${obs.count} chunks stored'),
+          content: Text(
+            'Loaded "$fileName" — ${obs.count} chunks with '
+            '${embedResponse.dimensions}-dim embeddings',
+          ),
           duration: const Duration(seconds: 3),
         ),
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load PDF: $e')),
-      );
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to embed PDF: $e')));
     }
   }
 
@@ -131,8 +156,7 @@ class _ChatViewState extends ConsumerState<ChatView>
     if (ptePath == null) {
       // Maybe user picked a single .pte file (old flow)
       final singlePath = res.files.first.path;
-      if (singlePath != null &&
-          singlePath.toLowerCase().endsWith('.pte')) {
+      if (singlePath != null && singlePath.toLowerCase().endsWith('.pte')) {
         ptePath = singlePath;
       }
     }
@@ -140,9 +164,7 @@ class _ChatViewState extends ConsumerState<ChatView>
     if (ptePath == null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No .pte model file found in selection.'),
-        ),
+        const SnackBar(content: Text('No .pte model file found in selection.')),
       );
       return;
     }
@@ -153,8 +175,7 @@ class _ChatViewState extends ConsumerState<ChatView>
       try {
         final files = dir.listSync().whereType<File>();
         for (final f in files) {
-          final name =
-              f.path.split(Platform.pathSeparator).last.toLowerCase();
+          final name = f.path.split(Platform.pathSeparator).last.toLowerCase();
           if (vocabPath == null &&
               (name == 'tokenizer.json' ||
                   name.endsWith('_vocab.json') ||
@@ -192,11 +213,9 @@ class _ChatViewState extends ConsumerState<ChatView>
     }
 
     // Load model + tokenizer via native channel
-    await ref.read(modelProvider.notifier).loadModel(
-          ptePath,
-          vocabPath: vocabPath,
-          configPath: configPath,
-        );
+    await ref
+        .read(modelProvider.notifier)
+        .loadModel(ptePath, vocabPath: vocabPath, configPath: configPath);
   }
 
   @override
@@ -224,8 +243,7 @@ class _ChatViewState extends ConsumerState<ChatView>
           if (chat.messages.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
-              onPressed: () =>
-                  ref.read(chatProvider.notifier).clearHistory(),
+              onPressed: () => ref.read(chatProvider.notifier).clearHistory(),
               tooltip: 'Clear chat',
             ),
         ],
@@ -239,7 +257,9 @@ class _ChatViewState extends ConsumerState<ChatView>
                 Container(
                   width: double.infinity,
                   margin: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 8),
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
                     color: const Color(0xFFFFF3E0),
@@ -248,19 +268,26 @@ class _ChatViewState extends ConsumerState<ChatView>
                   ),
                   child: Column(
                     children: [
-                      const Row(children: [
-                        Icon(Icons.info_outline,
-                            size: 18, color: Color(0xFFE65100)),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'No model loaded. Select files together:\n'
-                            '.pte model + tokenizer.json',
-                            style: TextStyle(
-                                fontSize: 13, color: Color(0xFFE65100)),
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.info_outline,
+                            size: 18,
+                            color: Color(0xFFE65100),
                           ),
-                        ),
-                      ]),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'No model loaded. Select files together:\n'
+                              '.pte model + tokenizer.json',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Color(0xFFE65100),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 10),
                       SizedBox(
                         width: double.infinity,
@@ -277,31 +304,42 @@ class _ChatViewState extends ConsumerState<ChatView>
                 Container(
                   width: double.infinity,
                   margin: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 8),
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 8),
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: const Color(0xFFE8F5E9),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: Row(children: [
-                    const Icon(Icons.check_circle,
-                        size: 16, color: Color(0xFF43A047)),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '${model.modelPath!.split(Platform.pathSeparator).last}'
-                        '${dbCount > 0 ? '  •  $dbCount chunks in DB' : ''}'
-                        '${model.isDemoMode ? '  •  Demo mode' : ''}',
-                        style: const TextStyle(fontSize: 12),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.check_circle,
+                        size: 16,
+                        color: Color(0xFF43A047),
                       ),
-                    ),
-                    TextButton(
-                      onPressed: _loadModel,
-                      child: const Text('Change',
-                          style: TextStyle(fontSize: 12)),
-                    ),
-                  ]),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${model.modelPath!.split(Platform.pathSeparator).last}'
+                          '${dbCount > 0 ? '  •  $dbCount chunks in DB' : ''}'
+                          '${model.isDemoMode ? '  •  Demo mode' : ''}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _loadModel,
+                        child: const Text(
+                          'Change',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
 
               // ── Tokenizer warning ─────────────────────────────────────
@@ -314,21 +352,30 @@ class _ChatViewState extends ConsumerState<ChatView>
                     color: const Color(0xFFFFF8E1),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
-                        color: const Color(0xFFFFE082), width: 0.5),
-                  ),
-                  child: const Row(children: [
-                    Icon(Icons.warning_amber_rounded,
-                        size: 16, color: Color(0xFFF9A825)),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Tokenizer not found. Place tokenizer.json '
-                        'in the same folder as your .pte file.',
-                        style: TextStyle(
-                            fontSize: 11, color: Color(0xFFF57F17)),
-                      ),
+                      color: const Color(0xFFFFE082),
+                      width: 0.5,
                     ),
-                  ]),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(
+                        Icons.warning_amber_rounded,
+                        size: 16,
+                        color: Color(0xFFF9A825),
+                      ),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Tokenizer not found. Place tokenizer.json '
+                          'in the same folder as your .pte file.',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFFF57F17),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
 
               // ── Messages ──────────────────────────────────────────────
@@ -338,16 +385,20 @@ class _ChatViewState extends ConsumerState<ChatView>
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.chat_bubble_outline,
-                                size: 48, color: Colors.grey.shade300),
+                            Icon(
+                              Icons.chat_bubble_outline,
+                              size: 48,
+                              color: Colors.grey.shade300,
+                            ),
                             const SizedBox(height: 12),
                             Text(
                               hasModel
                                   ? 'Ask anything about your document'
                                   : 'Load a model to start',
                               style: TextStyle(
-                                  color: Colors.grey.shade500,
-                                  fontSize: 14),
+                                color: Colors.grey.shade500,
+                                fontSize: 14,
+                              ),
                             ),
                           ],
                         ),
@@ -355,11 +406,14 @@ class _ChatViewState extends ConsumerState<ChatView>
                     : ListView.builder(
                         controller: _scroll,
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 8),
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
                         itemCount: chat.messages.length,
                         itemBuilder: (_, i) {
                           // Auto-scroll when the last message is being streamed
-                          if (i == chat.messages.length - 1 && chat.isInferencing) {
+                          if (i == chat.messages.length - 1 &&
+                              chat.isInferencing) {
                             _scrollToBottom();
                           }
                           return _Bubble(message: chat.messages[i]);
@@ -371,76 +425,89 @@ class _ChatViewState extends ConsumerState<ChatView>
               if (chat.isInferencing)
                 Padding(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 4),
-                  child: Row(children: [
-                    SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.grey.shade400,
+                    horizontal: 16,
+                    vertical: 4,
+                  ),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.grey.shade400,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text('Generating…',
+                      const SizedBox(width: 8),
+                      Text(
+                        'Generating…',
                         style: TextStyle(
-                            fontSize: 12, color: Colors.grey.shade500)),
-                  ]),
+                          fontSize: 12,
+                          color: Colors.grey.shade500,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
 
               // ── Input bar ─────────────────────────────────────────────
               Container(
                 decoration: BoxDecoration(
                   color: Colors.white,
-                  border:
-                      Border(top: BorderSide(color: Colors.grey.shade200)),
+                  border: Border(top: BorderSide(color: Colors.grey.shade200)),
                 ),
                 child: SafeArea(
                   top: false,
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
-                    child: Row(children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _ctrl,
-                          enabled: hasModel && !chat.isInferencing,
-                          maxLines: null,
-                          textInputAction: TextInputAction.send,
-                          onSubmitted: (_) => _send(),
-                          decoration: InputDecoration(
-                            hintText: hasModel
-                                ? 'Ask about your document…'
-                                : 'Load a model first',
-                            filled: true,
-                            fillColor: const Color(0xFFF5F5F5),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
-                              borderSide: BorderSide.none,
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _ctrl,
+                            enabled: hasModel && !chat.isInferencing,
+                            maxLines: null,
+                            textInputAction: TextInputAction.send,
+                            onSubmitted: (_) => _send(),
+                            decoration: InputDecoration(
+                              hintText: hasModel
+                                  ? 'Ask about your document…'
+                                  : 'Load a model first',
+                              filled: true,
+                              fillColor: const Color(0xFFF5F5F5),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(24),
+                                borderSide: BorderSide.none,
+                              ),
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 10,
+                              ),
                             ),
-                            isDense: true,
-                            contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 10),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Container(
-                        decoration: BoxDecoration(
-                          color: hasModel
-                              ? const Color(0xFF4F56C7)
-                              : Colors.grey.shade300,
-                          shape: BoxShape.circle,
+                        const SizedBox(width: 8),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: hasModel
+                                ? const Color(0xFF4F56C7)
+                                : Colors.grey.shade300,
+                            shape: BoxShape.circle,
+                          ),
+                          child: IconButton(
+                            onPressed: hasModel && !chat.isInferencing
+                                ? _send
+                                : null,
+                            icon: const Icon(Icons.send, size: 18),
+                            color: Colors.white,
+                          ),
                         ),
-                        child: IconButton(
-                          onPressed: hasModel && !chat.isInferencing
-                              ? _send
-                              : null,
-                          icon: const Icon(Icons.send, size: 18),
-                          color: Colors.white,
-                        ),
-                      ),
-                    ]),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -456,8 +523,7 @@ class _ChatViewState extends ConsumerState<ChatView>
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     FadeTransition(
-                      opacity: Tween(begin: 0.3, end: 1.0)
-                          .animate(_pulseCtrl),
+                      opacity: Tween(begin: 0.3, end: 1.0).animate(_pulseCtrl),
                       child: Container(
                         padding: const EdgeInsets.all(28),
                         decoration: const BoxDecoration(
@@ -532,12 +598,9 @@ class _Bubble extends StatelessWidget {
         ),
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 4),
-          padding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: isUser
-                ? const Color(0xFF4F56C7)
-                : const Color(0xFFF5F5F5),
+            color: isUser ? const Color(0xFF4F56C7) : const Color(0xFFF5F5F5),
             borderRadius: BorderRadius.only(
               topLeft: const Radius.circular(16),
               topRight: const Radius.circular(16),
@@ -552,19 +615,26 @@ class _Bubble extends StatelessWidget {
               if (!isUser && message.noContextWarning) ...[
                 Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 4),
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
                   margin: const EdgeInsets.only(bottom: 8),
                   decoration: BoxDecoration(
                     color: const Color(0xFFFFF8E1),
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(
-                        color: const Color(0xFFFFE082), width: 0.5),
+                      color: const Color(0xFFFFE082),
+                      width: 0.5,
+                    ),
                   ),
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.warning_amber_rounded,
-                          size: 14, color: Color(0xFFF9A825)),
+                      Icon(
+                        Icons.warning_amber_rounded,
+                        size: 14,
+                        color: Color(0xFFF9A825),
+                      ),
                       SizedBox(width: 4),
                       Flexible(
                         child: Text(
@@ -583,8 +653,7 @@ class _Bubble extends StatelessWidget {
               Text(
                 message.content,
                 style: TextStyle(
-                  color:
-                      isUser ? Colors.white : const Color(0xFF1A1A2E),
+                  color: isUser ? Colors.white : const Color(0xFF1A1A2E),
                   fontSize: 14,
                 ),
               ),

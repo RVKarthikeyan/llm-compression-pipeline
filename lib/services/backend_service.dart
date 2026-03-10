@@ -28,10 +28,10 @@ class AuthResponse {
   });
 
   factory AuthResponse.fromJson(Map<String, dynamic> json) => AuthResponse(
-        status: json['status'] as String,
-        username: json['username'] as String,
-        userHash: json['user_hash'] as String,
-      );
+    status: json['status'] as String,
+    username: json['username'] as String,
+    userHash: json['user_hash'] as String,
+  );
 }
 
 /// Response from POST /trigger-pipeline.
@@ -77,16 +77,61 @@ class PipelineStatusResponse {
       );
 
   bool get isRunning => const {
-        'queued',
-        'pruning',
-        'distilling',
-        'quantizing',
-        'uploading',
-      }.contains(status);
+    'queued',
+    'pruning',
+    'distilling',
+    'quantizing',
+    'uploading',
+  }.contains(status);
 
   bool get isCompleted => status == 'completed';
   bool get isFailed => status == 'failed';
   bool get noJob => status == 'no_job';
+}
+
+/// A single chunk returned by POST /embed — text + its 384-dim embedding.
+class EmbedChunk {
+  final int index;
+  final String text;
+  final List<double> embedding;
+
+  const EmbedChunk({
+    required this.index,
+    required this.text,
+    required this.embedding,
+  });
+
+  factory EmbedChunk.fromJson(Map<String, dynamic> json) => EmbedChunk(
+    index: json['index'] as int,
+    text: json['text'] as String,
+    embedding: (json['embedding'] as List<dynamic>)
+        .map((e) => (e as num).toDouble())
+        .toList(),
+  );
+}
+
+/// Response from POST /embed.
+class EmbedResponse {
+  final String model;
+  final int dimensions;
+  final int count;
+  final List<EmbedChunk> chunks;
+
+  const EmbedResponse({
+    required this.model,
+    required this.dimensions,
+    required this.count,
+    required this.chunks,
+  });
+
+  factory EmbedResponse.fromJson(Map<String, dynamic> json) => EmbedResponse(
+    model: json['model'] as String,
+    dimensions: json['dimensions'] as int,
+    count: json['count'] as int,
+    chunks: (json['chunks'] as List<dynamic>)
+        .map((e) => EmbedChunk.fromJson(e as Map<String, dynamic>))
+        .toList(),
+  );
 }
 
 /// Backend API service — talks to the FastAPI compression pipeline.
@@ -96,11 +141,13 @@ class BackendService {
   final Dio _dio;
 
   BackendService({String? baseUrl})
-      : _dio = Dio(BaseOptions(
+    : _dio = Dio(
+        BaseOptions(
           baseUrl: baseUrl ?? _defaultBaseUrl,
           connectTimeout: const Duration(seconds: 30),
           receiveTimeout: const Duration(seconds: 60),
-        ));
+        ),
+      );
 
   /// Override the base URL at runtime (e.g. from settings).
   void setBaseUrl(String url) {
@@ -142,21 +189,50 @@ class BackendService {
       }),
     );
     return TriggerPipelineResponse.fromJson(
-        response.data as Map<String, dynamic>);
+      response.data as Map<String, dynamic>,
+    );
   }
 
   // ── GET /status ─────────────────────────────────────────────────────────
 
   /// Poll the pipeline status.
-  Future<PipelineStatusResponse> getStatus({
-    required String hfToken,
-  }) async {
+  Future<PipelineStatusResponse> getStatus({required String hfToken}) async {
     final response = await _dio.get(
       '/status',
       queryParameters: {'hf_token': hfToken},
     );
     return PipelineStatusResponse.fromJson(
-        response.data as Map<String, dynamic>);
+      response.data as Map<String, dynamic>,
+    );
+  }
+
+  // ── POST /embed ─────────────────────────────────────────────────────
+
+  /// Upload a PDF to the backend for text extraction, chunking, and embedding.
+  /// Returns chunks with their 384-dim embeddings.
+  Future<EmbedResponse> embedPdf({
+    required String hfToken,
+    required File pdfFile,
+    int chunkSize = 500,
+    int chunkOverlap = 50,
+  }) async {
+    final response = await _dio.post(
+      '/embed',
+      data: FormData.fromMap({
+        'hf_token': hfToken,
+        'pdf_file': await MultipartFile.fromFile(
+          pdfFile.path,
+          filename: pdfFile.path.split(Platform.pathSeparator).last,
+        ),
+        'chunk_size': chunkSize,
+        'chunk_overlap': chunkOverlap,
+      }),
+      options: Options(
+        // Embedding a large PDF can take a while
+        receiveTimeout: const Duration(minutes: 5),
+      ),
+    );
+    return EmbedResponse.fromJson(response.data as Map<String, dynamic>);
   }
 
   // ── HuggingFace model download ────────────────────────────────────────

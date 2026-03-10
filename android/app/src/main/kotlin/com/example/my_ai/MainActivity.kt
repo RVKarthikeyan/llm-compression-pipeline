@@ -63,6 +63,9 @@ class MainActivity : FlutterActivity() {
     // "llama3" or "gemma" — detected from tokenizer_config.json
     private var chatTemplateType = "llama3"
 
+    // On-device embedding model for query vectorization
+    private var embeddingService: OnnxEmbeddingService? = null
+
     private fun log(msg: String) {
         Log.i(TAG, msg)
         mainHandler.post {
@@ -122,6 +125,17 @@ class MainActivity : FlutterActivity() {
                     stopRequested = true
                     try { llmModule?.stop() } catch (_: Exception) {}
                     result.success("stop_ok")
+                }
+                "initEmbeddingModel" -> {
+                    handleInitEmbeddingModel(result)
+                }
+                "embedQuery" -> {
+                    val text = call.argument<String>("text")
+                    if (text.isNullOrEmpty()) {
+                        result.error("EMPTY_INPUT", "Text is empty", null)
+                        return@setMethodCallHandler
+                    }
+                    handleEmbedQuery(text, result)
                 }
                 else -> result.notImplemented()
             }
@@ -539,6 +553,66 @@ You are a precise document assistant. Follow these rules strictly:
             }
         } catch (_: Exception) {}
         return false
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  EMBEDDING MODEL (ONNX)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun handleInitEmbeddingModel(result: MethodChannel.Result) {
+        executor.execute {
+            try {
+                if (embeddingService?.ready() == true) {
+                    mainHandler.post { result.success("already_loaded") }
+                    return@execute
+                }
+                log("Loading ONNX embedding model...")
+                embeddingService = OnnxEmbeddingService(this@MainActivity)
+                embeddingService!!.initialize()
+                if (embeddingService!!.ready()) {
+                    log("Embedding model ready")
+                    mainHandler.post { result.success("loaded") }
+                } else {
+                    mainHandler.post {
+                        result.error("LOAD_FAILED", "Embedding model failed to initialize", null)
+                    }
+                }
+            } catch (e: Exception) {
+                logError("Embedding model init failed: ${e.message}", e)
+                mainHandler.post {
+                    result.error("LOAD_FAILED", e.message, null)
+                }
+            }
+        }
+    }
+
+    private fun handleEmbedQuery(text: String, result: MethodChannel.Result) {
+        executor.execute {
+            try {
+                // Auto-initialize if not yet loaded
+                if (embeddingService?.ready() != true) {
+                    log("Auto-initializing embedding model for query...")
+                    embeddingService = OnnxEmbeddingService(this@MainActivity)
+                    embeddingService!!.initialize()
+                }
+
+                val embedding = embeddingService?.embed(text)
+                if (embedding != null) {
+                    // Return as List<Double> for Flutter
+                    val doubleList = embedding.map { it.toDouble() }
+                    mainHandler.post { result.success(doubleList) }
+                } else {
+                    mainHandler.post {
+                        result.error("EMBED_FAILED", "Failed to generate embedding", null)
+                    }
+                }
+            } catch (e: Exception) {
+                logError("Embed query failed: ${e.message}", e)
+                mainHandler.post {
+                    result.error("EMBED_FAILED", e.message, null)
+                }
+            }
+        }
     }
 
     private fun findRootCause(e: Throwable): Throwable {

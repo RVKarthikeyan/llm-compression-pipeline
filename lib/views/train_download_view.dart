@@ -5,7 +5,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../providers/app_providers.dart';
 import '../services/backend_service.dart';
@@ -162,27 +161,24 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
         _error = null;
       });
 
-      // Extract text and store chunks in ObjectBox for RAG
+      // Upload PDF to backend /embed for chunking + embedding
       try {
-        final doc = PdfDocument(inputBytes: file.readAsBytesSync());
-        final text = PdfTextExtractor(doc).extractText();
-        doc.dispose();
-
-        debugPrint('[RAG] Extracted ${text.length} chars from PDF');
-        debugPrint(
-          '[RAG] First 500 chars: ${text.substring(0, text.length < 500 ? text.length : 500)}',
+        final hfToken = _tokenCtrl.text.trim();
+        final backend = ref.read(backendServiceProvider);
+        final embedResponse = await backend.embedPdf(
+          hfToken: hfToken,
+          pdfFile: file,
         );
 
-        // Use smart chunking that preserves patient sections and logical blocks
         final obs = ref.read(objectBoxProvider);
-        await obs.replaceChunksFromText(text);
+        obs.replaceChunksFromEmbedResponse(embedResponse.chunks);
 
         final storedCount = obs.count;
-        debugPrint('[RAG] Stored $storedCount chunks in ObjectBox');
+        debugPrint('[RAG] Stored $storedCount chunks with embeddings');
 
         setState(() => _chunkCount = storedCount);
       } catch (e) {
-        debugPrint('[RAG] PDF chunking FAILED: $e');
+        debugPrint('[RAG] PDF embedding FAILED: $e');
       }
     } finally {
       setState(() => _pickingPdf = false);
@@ -261,7 +257,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
     try {
       // Save to internal app storage (not cache, not user-picked)
       final appDir = await getApplicationDocumentsDirectory();
-      final modelsDir = Directory('${appDir.path}${Platform.pathSeparator}models');
+      final modelsDir = Directory(
+        '${appDir.path}${Platform.pathSeparator}models',
+      );
       if (!modelsDir.existsSync()) {
         modelsDir.createSync(recursive: true);
       }
@@ -280,18 +278,26 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
       if (!mounted) return;
 
       // Load model with downloaded tokenizer paths
-      ref.read(modelProvider.notifier).loadModel(
+      ref
+          .read(modelProvider.notifier)
+          .loadModel(
             result.pteFile.path,
             vocabPath: result.vocabPath,
             configPath: result.configPath,
           );
 
-      final downloadedFiles = <String>[result.pteFile.path.split(Platform.pathSeparator).last];
+      final downloadedFiles = <String>[
+        result.pteFile.path.split(Platform.pathSeparator).last,
+      ];
       if (result.vocabPath != null) {
-        downloadedFiles.add(result.vocabPath!.split(Platform.pathSeparator).last);
+        downloadedFiles.add(
+          result.vocabPath!.split(Platform.pathSeparator).last,
+        );
       }
       if (result.configPath != null) {
-        downloadedFiles.add(result.configPath!.split(Platform.pathSeparator).last);
+        downloadedFiles.add(
+          result.configPath!.split(Platform.pathSeparator).last,
+        );
       }
 
       setState(() {

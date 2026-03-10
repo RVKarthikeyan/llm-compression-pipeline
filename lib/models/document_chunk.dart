@@ -9,15 +9,11 @@ class DocumentChunk {
   /// Raw text of the chunk extracted from the PDF.
   String text;
 
-  /// Placeholder for future dense vector embeddings.
-  /// Marked @Transient so ObjectBox ignores it until a proper
-  /// float-vector property (or separate embedding store) is wired up.
-  @Transient()
+  /// Dense vector embedding (384 dimensions, from all-MiniLM-L6-v2).
+  /// Indexed with HNSW for fast approximate nearest-neighbor search.
+  @HnswIndex(dimensions: 384, distanceType: VectorDistanceType.cosine)
+  @Property(type: PropertyType.floatVector)
   List<double>? embedding;
 
-  DocumentChunk({
-    this.id = 0,
-    required this.text,
-    this.embedding,
-  });
+  DocumentChunk({this.id = 0, required this.text, this.embedding});
 }
