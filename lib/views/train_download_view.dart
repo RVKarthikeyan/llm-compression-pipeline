@@ -79,7 +79,7 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
     if (url.isNotEmpty && _urlCtrl.text.isEmpty) {
       _urlCtrl.text = url;
     } else if (_urlCtrl.text.isEmpty) {
-      _urlCtrl.text = 'http://10.0.2.2:8000';
+      _urlCtrl.text = '';
     }
   }
 
