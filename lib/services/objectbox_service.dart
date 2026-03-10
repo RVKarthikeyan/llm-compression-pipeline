@@ -40,16 +40,16 @@ class ObjectBoxService {
     _box.putMany(entities);
   }
 
-  /// Smart chunking: splits raw text into semantically meaningful chunks,
-  /// preserving patient sections or large logical blocks.
+  /// Smart chunking: splits raw text into semantically meaningful chunks
+  /// with overlap so boundary data isn't lost.
   Future<void> replaceChunksFromText(String text) async {
     _box.removeAll();
 
     final chunks = <String>[];
 
-    // 1. Try splitting by patient section headers (e.g. "Patient 1", "Patient Information")
+    // 1. Try splitting by patient/record section headers
     final sectionPattern = RegExp(
-      r'(?=Patient\s+\d+|Patient\s+Information|Apex\s+Healthcare)',
+      r'(?=Patient\s+\d+|Patient\s+Information|Apex\s+Healthcare|Record\s+\d+|Case\s+\d+)',
       caseSensitive: false,
     );
     final sections = text.split(sectionPattern)
@@ -58,20 +58,31 @@ class ObjectBoxService {
         .toList();
 
     if (sections.length >= 3) {
-      // Merge small consecutive sections that belong together.
-      // Each "Patient N" header + its data block becomes one chunk.
-      String buffer = '';
       for (final section in sections) {
-        if (buffer.isNotEmpty &&
-            buffer.length + section.length > 2500 &&
-            buffer.length > 200) {
-          chunks.add(buffer.trim());
-          buffer = section;
+        if (section.length <= 1200) {
+          chunks.add(section.trim());
         } else {
-          buffer = buffer.isEmpty ? section : '$buffer\n$section';
+          // Split oversized sections on paragraph boundaries
+          final paras = section.split(RegExp(r'\n\s*\n'))
+              .map((s) => s.trim())
+              .where((s) => s.length > 10)
+              .toList();
+          String buffer = '';
+          for (final para in paras) {
+            if (buffer.isNotEmpty && buffer.length + para.length > 1200) {
+              chunks.add(buffer.trim());
+              // Overlap: keep last ~200 chars of previous chunk
+              final overlap = buffer.length > 200
+                  ? buffer.substring(buffer.length - 200)
+                  : buffer;
+              buffer = '$overlap\n\n$para';
+            } else {
+              buffer = buffer.isEmpty ? para : '$buffer\n\n$para';
+            }
+          }
+          if (buffer.trim().length > 10) chunks.add(buffer.trim());
         }
       }
-      if (buffer.trim().length > 20) chunks.add(buffer.trim());
     }
 
     // 2. If section-based splitting didn't produce enough chunks, try paragraphs
@@ -83,14 +94,17 @@ class ObjectBoxService {
           .toList();
 
       if (paragraphs.length >= 3) {
-        // Merge tiny paragraphs into bigger chunks (~1500 chars each)
         String buffer = '';
         for (final para in paragraphs) {
           if (buffer.isNotEmpty &&
-              buffer.length + para.length > 1500 &&
+              buffer.length + para.length > 800 &&
               buffer.length > 100) {
             chunks.add(buffer.trim());
-            buffer = para;
+            // Overlap
+            final overlap = buffer.length > 150
+                ? buffer.substring(buffer.length - 150)
+                : buffer;
+            buffer = '$overlap\n\n$para';
           } else {
             buffer = buffer.isEmpty ? para : '$buffer\n\n$para';
           }
@@ -99,7 +113,7 @@ class ObjectBoxService {
       }
     }
 
-    // 3. Final fallback: split by sentences, grouped into ~1000-char chunks
+    // 3. Final fallback: split by sentences, grouped into ~600-char chunks
     if (chunks.length < 3) {
       chunks.clear();
       final sentences = text.split(RegExp(r'(?<=[.!?])\s+'))
@@ -108,7 +122,7 @@ class ObjectBoxService {
       String buffer = '';
       for (final sent in sentences) {
         if (buffer.isNotEmpty &&
-            buffer.length + sent.length > 1000 &&
+            buffer.length + sent.length > 600 &&
             buffer.length > 100) {
           chunks.add(buffer.trim());
           buffer = sent;
@@ -149,64 +163,219 @@ class ObjectBoxService {
     'that', 'these', 'those', 'am', 'it', 'its', 'he', 'she', 'they',
     'them', 'his', 'her', 'my', 'your', 'our', 'their', 'me', 'him',
     'us', 'you', 'i', 'we', 'tell', 'give', 'get', 'got', 'many',
-    'much', 'any', 'also', 'well',
+    'much', 'any', 'also', 'well', 'list', 'state', 'specific',
+    'provided', 'dataset', 'levels',
   };
 
-  /// Returns up to [limit] chunks whose text contains any keyword from [query].
-  /// Uses stopword removal, punctuation cleaning, and weighted scoring.
-  List<String> searchContext(String query, {int limit = 5}) {
-    // Extract meaningful keywords: remove punctuation, possessives, stopwords
-    final keywords = query
-        .toLowerCase()
-        .replaceAll(RegExp(r"['']"), ' ')   // handle possessives
-        .split(RegExp(r'\s+'))
-        .map((w) => w.replaceAll(RegExp(r'[^\w]'), ''))
-        .where((w) => w.length > 1 && !_stopwords.contains(w))
-        .toSet()   // deduplicate
-        .toList();
+  // Medical drug class → specific drug name mappings for synonym expansion
+  static const _medSynonyms = <String, List<String>>{
+    'fluoroquinolone': ['levofloxacin', 'moxifloxacin', 'ciprofloxacin', 'ofloxacin', 'norfloxacin'],
+    'macrolide': ['azithromycin', 'clarithromycin', 'erythromycin'],
+    'cephalosporin': ['ceftriaxone', 'cefuroxime', 'cephalexin', 'cefazolin', 'cefepime'],
+    'penicillin': ['amoxicillin', 'ampicillin', 'piperacillin'],
+    'carbapenem': ['meropenem', 'imipenem', 'ertapenem', 'doripenem'],
+    'aminoglycoside': ['gentamicin', 'tobramycin', 'amikacin'],
+    'tetracycline': ['doxycycline', 'minocycline', 'tetracycline'],
+    'nsaid': ['ibuprofen', 'naproxen', 'diclofenac', 'aspirin', 'celecoxib'],
+    'antibiotic': ['levofloxacin', 'moxifloxacin', 'azithromycin', 'ceftriaxone', 'amoxicillin', 'ciprofloxacin', 'doxycycline', 'vancomycin'],
+    'aki': ['acute kidney injury', 'creatinine', 'renal'],
+    'ckd': ['chronic kidney disease', 'renal', 'creatinine'],
+    'diagnosis': ['diagnosed', 'assessment', 'impression'],
+    'medication': ['prescribed', 'drug', 'treatment', 'therapy', 'medicine'],
+    'prescribed': ['medication', 'received', 'administered', 'given'],
+  };
 
-    if (keywords.isEmpty) {
-      // No meaningful keywords — return all chunks (capped)
-      return _box.getAll().take(limit).map((e) => e.text).toList();
+  /// Expand keywords with medical synonyms and prefix stems.
+  List<String> _expandKeywords(List<String> keywords) {
+    final expanded = <String>{...keywords};
+
+    for (final kw in keywords) {
+      // Add synonym expansions
+      final syns = _medSynonyms[kw];
+      if (syns != null) expanded.addAll(syns);
+
+      // Reverse lookup: if 'levofloxacin' is queried, also find 'fluoroquinolone'
+      for (final entry in _medSynonyms.entries) {
+        if (entry.value.contains(kw)) {
+          expanded.add(entry.key);
+        }
+      }
+
+      // Prefix stem matching: 'prescri' matches 'prescribed', 'prescription'
+      // Only for words ≥5 chars: use first 5+ chars as stem
+      if (kw.length >= 6 && !kw.contains(' ')) {
+        expanded.add(kw.substring(0, (kw.length * 0.7).ceil().clamp(4, kw.length)));
+      }
     }
 
-    // Build OR condition: text contains keyword1 OR keyword2 OR …
+    return expanded.toList();
+  }
+
+  /// Extract keywords from a query: unigrams + bigrams + entity patterns.
+  List<String> _extractKeywords(String query) {
+    // Clean the query
+    final clean = query
+        .replaceAll(RegExp(r"[''`]"), ' ')
+        .replaceAll(RegExp(r'[^\w\s\d()-]'), ' ');
+
+    // Extract raw words (preserve case for entity detection)
+    final rawWords = clean.split(RegExp(r'\s+'))
+        .where((w) => w.length > 1)
+        .toList();
+
+    final keywords = <String>{};
+
+    // 1. Add unigrams (lowercased, without stopwords)
+    final unigrams = rawWords
+        .map((w) => w.replaceAll(RegExp(r'[^\w]'), '').toLowerCase())
+        .where((w) => w.length > 1 && !_stopwords.contains(w))
+        .toList();
+    keywords.addAll(unigrams);
+
+    // 2. Add bigrams from consecutive non-stopword words
+    //    e.g. "Thomas Wright" → "thomas wright"
+    //    e.g. "serum creatinine" → "serum creatinine"
+    for (int i = 0; i < rawWords.length - 1; i++) {
+      final a = rawWords[i].replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+      final b = rawWords[i + 1].replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+      if (a.length > 1 && b.length > 1 &&
+          !_stopwords.contains(a) && !_stopwords.contains(b)) {
+        keywords.add('$a $b');
+      }
+    }
+
+    // 3. Detect "Patient N" patterns → also search for "patient N" as phrase
+    final patientMatch = RegExp(r'patient\s+(\d+)', caseSensitive: false)
+        .firstMatch(query);
+    if (patientMatch != null) {
+      keywords.add('patient ${patientMatch.group(1)}');
+    }
+
+    // 4. Detect parenthesized names like "(Thomas Wright)"
+    final parenName = RegExp(r'\(([A-Z][a-z]+ [A-Z][a-z]+)\)').firstMatch(query);
+    if (parenName != null) {
+      keywords.add(parenName.group(1)!.toLowerCase());
+    }
+
+    return keywords.toList();
+  }
+
+  /// Score a chunk against a set of keywords (already expanded).
+  double _scoreChunk(String chunkText, List<String> keywords) {
+    final lower = chunkText.toLowerCase();
+    double score = 0;
+
+    for (final kw in keywords) {
+      // For prefix stems: check if any word in text starts with the keyword
+      bool matched;
+      if (kw.length >= 4 && kw.length <= 6 && !kw.contains(' ')) {
+        // Prefix/stem match — find words starting with this stem
+        matched = RegExp('\\b${RegExp.escape(kw)}').hasMatch(lower);
+      } else {
+        matched = lower.contains(kw);
+      }
+      if (!matched) continue;
+
+      final isBigram = kw.contains(' ');
+      final isNumber = RegExp(r'^\d+$').hasMatch(kw);
+
+      // Base score: bigrams worth more (phrase match), numbers moderate
+      double kwScore = isBigram ? 3.0 : (isNumber ? 0.5 : 1.0);
+
+      // Count occurrences
+      int count = 0;
+      int idx = 0;
+      while ((idx = lower.indexOf(kw, idx)) != -1) {
+        count++;
+        idx += kw.length;
+      }
+      kwScore += (count - 1) * 0.3;
+
+      // Exact word boundary match bonus
+      if (RegExp('\\b${RegExp.escape(kw)}\\b').hasMatch(lower)) {
+        kwScore *= 1.3;
+      }
+
+      score += kwScore;
+    }
+
+    // Bonus for matching a higher fraction of all keywords
+    if (score > 0 && keywords.isNotEmpty) {
+      int matchedCount = 0;
+      for (final kw in keywords) {
+        if (kw.length >= 4 && kw.length <= 6 && !kw.contains(' ')) {
+          if (RegExp('\\b${RegExp.escape(kw)}').hasMatch(lower)) matchedCount++;
+        } else if (lower.contains(kw)) {
+          matchedCount++;
+        }
+      }
+      score += (matchedCount / keywords.length) * 2.0;
+    }
+
+    return score;
+  }
+
+  /// Detect if query is broad ("list all", "which patients", etc.)
+  bool _isBroadQuery(String query) {
+    final lower = query.toLowerCase();
+    return lower.contains('list all') ||
+           lower.contains('all patient') ||
+           lower.contains('which patient') ||
+           lower.contains('how many') ||
+           lower.contains('every patient') ||
+           lower.contains('each patient') ||
+           lower.contains('summarize') ||
+           lower.contains('summary') ||
+           lower.contains('overview');
+  }
+
+  /// Returns up to [limit] chunks whose text contains any keyword from [query].
+  /// Uses n-gram matching, entity detection, synonym expansion, and weighted scoring.
+  List<String> searchContext(String query, {int limit = 5}) {
+    final rawKeywords = _extractKeywords(query);
+    final keywords = _expandKeywords(rawKeywords);
+    final broad = _isBroadQuery(query);
+    final effectiveLimit = broad ? limit + 3 : limit;
+
+    if (keywords.isEmpty) {
+      return _box.getAll().take(effectiveLimit).map((e) => e.text).toList();
+    }
+
+    // Build OR condition for all single-word keywords (DB-level pre-filter)
     Condition<DocumentChunk>? condition;
     for (final kw in keywords) {
+      if (kw.contains(' ')) continue; // skip bigrams for DB filter
+      if (kw.length < 3) continue;
       final c = DocumentChunk_.text.contains(kw, caseSensitive: false);
       condition = condition == null ? c : condition.or(c);
     }
 
-    final results = _box
-        .query(condition!)
-        .build()
-        .find();
-
-    // Score results by how many keywords they match + bonus for density
-    final scored = results.map((chunk) {
-      double score = 0;
-      final lower = chunk.text.toLowerCase();
+    // If only bigrams, use the individual words for DB filter
+    if (condition == null) {
       for (final kw in keywords) {
-        if (lower.contains(kw)) {
-          score += 1.0;
-          // Count occurrences using indexOf loop (safe, no regex)
-          int count = 0;
-          int idx = 0;
-          while ((idx = lower.indexOf(kw, idx)) != -1) {
-            count++;
-            idx += kw.length;
+        for (final word in kw.split(' ')) {
+          if (word.length > 2) {
+            final c = DocumentChunk_.text.contains(word, caseSensitive: false);
+            condition = condition == null ? c : condition.or(c);
           }
-          score += (count - 1) * 0.3; // bonus for multiple occurrences
         }
       }
-      // Slight preference for chunks that match a higher percentage of keywords
-      score += (score / keywords.length) * 0.5;
-      return MapEntry(score, chunk);
+    }
+
+    if (condition == null) {
+      return _box.getAll().take(effectiveLimit).map((e) => e.text).toList();
+    }
+
+    final results = _box.query(condition).build().find();
+
+    final scored = results.map((chunk) {
+      return MapEntry(_scoreChunk(chunk.text, keywords), chunk);
     }).toList()
       ..sort((a, b) => b.key.compareTo(a.key));
 
     return scored
-        .take(limit)
+        .where((e) => e.key > 0)
+        .take(effectiveLimit)
         .map((e) => e.value.text)
         .toList();
   }
@@ -214,57 +383,36 @@ class ObjectBoxService {
   /// Total number of stored chunks.
   int get count => _box.count();
 
-  /// Scores ALL chunks against [query] keywords and returns up to [limit]
-  /// best-matching chunks. For small documents where we want to search
-  /// everything without relying on DB-level filtering.
+  /// Scores ALL chunks against [query] using n-grams, entities, synonyms,
+  /// and weighted scoring. For small documents (≤30 chunks).
   List<String> scoredSearchAll(String query, {int limit = 5}) {
     final all = _box.getAll();
     if (all.isEmpty) return [];
 
-    final keywords = query
-        .toLowerCase()
-        .replaceAll(RegExp(r"['\u2019]"), ' ')
-        .split(RegExp(r'\s+'))
-        .map((w) => w.replaceAll(RegExp(r'[^\w]'), ''))
-        .where((w) => w.length > 1 && !_stopwords.contains(w))
-        .toSet()
-        .toList();
+    final rawKeywords = _extractKeywords(query);
+    final keywords = _expandKeywords(rawKeywords);
+    final broad = _isBroadQuery(query);
+    final effectiveLimit = broad ? limit + 3 : limit;
 
     if (keywords.isEmpty) {
-      return all.take(limit).map((e) => e.text).toList();
+      return all.take(effectiveLimit).map((e) => e.text).toList();
     }
 
     final scored = all.map((chunk) {
-      double score = 0;
-      final lower = chunk.text.toLowerCase();
-      for (final kw in keywords) {
-        if (lower.contains(kw)) {
-          score += 1.0;
-          // Bonus for multiple occurrences
-          int count = 0;
-          int idx = 0;
-          while ((idx = lower.indexOf(kw, idx)) != -1) {
-            count++;
-            idx += kw.length;
-          }
-          score += (count - 1) * 0.3;
-        }
-      }
-      score += (score / keywords.length) * 0.5;
-      return MapEntry(score, chunk.text);
+      return MapEntry(_scoreChunk(chunk.text, keywords), chunk.text);
     }).toList()
       ..sort((a, b) => b.key.compareTo(a.key));
 
     // Return chunks that matched at least one keyword, up to limit
     final results = scored
         .where((e) => e.key > 0)
-        .take(limit)
+        .take(effectiveLimit)
         .map((e) => e.value)
         .toList();
 
     // If nothing matched, return first few chunks as fallback
     if (results.isEmpty) {
-      return all.take(limit).map((e) => e.text).toList();
+      return all.take(effectiveLimit).map((e) => e.text).toList();
     }
     return results;
   }

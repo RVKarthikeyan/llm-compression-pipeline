@@ -255,6 +255,55 @@ class ChatNotifier extends Notifier<ChatState> {
     }
   }
 
+  /// Trim a chunk to fit within [maxLen] chars by extracting the most
+  /// relevant sentences (those containing query keywords).
+  String _trimChunkToFit(String chunk, String query, int maxLen) {
+    if (chunk.length <= maxLen) return chunk;
+
+    final queryLower = query.toLowerCase();
+    final queryWords = queryLower
+        .split(RegExp(r'\s+'))
+        .where((w) => w.length > 2)
+        .toSet();
+
+    // Split into sentences
+    final sentences = chunk.split(RegExp(r'(?<=[.!?\n])[\s]*'))
+        .where((s) => s.trim().length > 5)
+        .toList();
+
+    if (sentences.isEmpty) return chunk.substring(0, maxLen);
+
+    // Score each sentence by how many query words it contains
+    final scored = <MapEntry<double, String>>[];
+    for (int i = 0; i < sentences.length; i++) {
+      final sLower = sentences[i].toLowerCase();
+      double score = 0;
+      for (final w in queryWords) {
+        if (sLower.contains(w)) score += 1;
+      }
+      // Slight bias toward earlier sentences (often have names/headers)
+      score += (sentences.length - i) * 0.01;
+      scored.add(MapEntry(score, sentences[i]));
+    }
+
+    scored.sort((a, b) => b.key.compareTo(a.key));
+
+    // Build trimmed output from highest-scoring sentences in original order
+    final selected = <int, String>{};
+    int totalLen = 0;
+    for (final entry in scored) {
+      if (totalLen + entry.value.length + 1 > maxLen) continue;
+      final idx = sentences.indexOf(entry.value);
+      selected[idx] = entry.value;
+      totalLen += entry.value.length + 1;
+    }
+
+    if (selected.isEmpty) return chunk.substring(0, maxLen);
+
+    final sortedKeys = selected.keys.toList()..sort();
+    return sortedKeys.map((k) => selected[k]).join(' ');
+  }
+
   Future<void> sendMessage(String userText) async {
     if (userText.trim().isEmpty) return;
 
@@ -271,32 +320,46 @@ class ChatNotifier extends Notifier<ChatState> {
     final totalChunks = obs.count;
     debugPrint('[RAG] ObjectBox has $totalChunks chunks');
 
-    // Always score chunks by relevance to the query.
+    // Always score chunks by relevance to the query using n-gram + entity matching.
     // For small docs (≤30 chunks), score ALL chunks so we don't miss anything.
-    // For larger docs, use DB-level keyword search first.
+    // For larger docs, use DB-level keyword pre-filter first.
     List<String> contextChunks;
     if (totalChunks > 0 && totalChunks <= 30) {
       contextChunks = obs.scoredSearchAll(userText);
-      debugPrint('[RAG] Scored ALL chunks → ${contextChunks.length} selected');
+      debugPrint('[RAG] Scored ALL $totalChunks chunks → ${contextChunks.length} selected');
     } else {
       contextChunks = obs.searchContext(userText);
-      debugPrint('[RAG] Keyword search returned ${contextChunks.length} chunks');
+      debugPrint('[RAG] DB search → ${contextChunks.length} chunks');
     }
     final hasContext = contextChunks.isNotEmpty;
 
     // Build context string, capped at 1500 chars to fit within
     // model's actual max_context_len (~940 tokens) with prompt overhead.
+    // Smart trimming: if a chunk is very large but only partly relevant,
+    // include just the most relevant portion to maximize information density.
     String? ctx;
     if (hasContext) {
       final buf = StringBuffer();
+      int chunksUsed = 0;
       for (final chunk in contextChunks) {
-        if (buf.length + chunk.length + 2 > 1500 && buf.isNotEmpty) break;
+        final remaining = 1500 - buf.length;
+        if (remaining < 50 && buf.isNotEmpty) break;
+
+        String toAdd = chunk;
+        // If chunk is too large for remaining budget, try to extract
+        // the most relevant sentences from it
+        if (toAdd.length > remaining && buf.isNotEmpty) {
+          toAdd = _trimChunkToFit(toAdd, userText, remaining - 2);
+          if (toAdd.isEmpty) break;
+        }
+
         if (buf.isNotEmpty) buf.write('\n\n');
-        buf.write(chunk);
+        buf.write(toAdd);
+        chunksUsed++;
       }
       ctx = buf.toString();
-      debugPrint('[RAG] Context: ${ctx.length} chars from ${contextChunks.length} chunks');
-      debugPrint('[RAG] Context preview: ${ctx.substring(0, ctx.length < 300 ? ctx.length : 300)}');
+      debugPrint('[RAG] Context: ${ctx.length} chars, $chunksUsed chunks used');
+      debugPrint('[RAG] Preview: ${ctx.substring(0, ctx.length < 200 ? ctx.length : 200)}');
     } else {
       debugPrint('[RAG] NO context found!');
     }

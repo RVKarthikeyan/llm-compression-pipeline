@@ -30,6 +30,7 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
   String? _username;
 
   // PDF
+  bool _pickingPdf = false;
   String? _pdfFileName;
   File? _pdfFile;
   int _chunkCount = 0;
@@ -141,38 +142,48 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
   }
 
   Future<void> _pickPdf() async {
-    final res = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['pdf'],
-    );
-    if (res == null) return;
+    if (_pickingPdf) return;
+    setState(() => _pickingPdf = true);
 
-    final file = File(res.files.single.path!);
-    setState(() {
-      _pdfFile = file;
-      _pdfFileName = res.files.single.name;
-      _error = null;
-    });
-
-    // Extract text and store chunks in ObjectBox for RAG
     try {
-      final doc = PdfDocument(inputBytes: file.readAsBytesSync());
-      final text = PdfTextExtractor(doc).extractText();
-      doc.dispose();
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+      );
+      if (res == null) {
+        setState(() => _pickingPdf = false);
+        return;
+      }
 
-      debugPrint('[RAG] Extracted ${text.length} chars from PDF');
-      debugPrint('[RAG] First 500 chars: ${text.substring(0, text.length < 500 ? text.length : 500)}');
+      final file = File(res.files.single.path!);
+      setState(() {
+        _pdfFile = file;
+        _pdfFileName = res.files.single.name;
+        _error = null;
+      });
 
-      // Use smart chunking that preserves patient sections and logical blocks
-      final obs = ref.read(objectBoxProvider);
-      await obs.replaceChunksFromText(text);
+      // Extract text and store chunks in ObjectBox for RAG
+      try {
+        final doc = PdfDocument(inputBytes: file.readAsBytesSync());
+        final text = PdfTextExtractor(doc).extractText();
+        doc.dispose();
 
-      final storedCount = obs.count;
-      debugPrint('[RAG] Stored $storedCount chunks in ObjectBox');
+        debugPrint('[RAG] Extracted ${text.length} chars from PDF');
+        debugPrint('[RAG] First 500 chars: ${text.substring(0, text.length < 500 ? text.length : 500)}');
 
-      setState(() => _chunkCount = storedCount);
-    } catch (e) {
-      debugPrint('[RAG] PDF chunking FAILED: $e');
+        // Use smart chunking that preserves patient sections and logical blocks
+        final obs = ref.read(objectBoxProvider);
+        await obs.replaceChunksFromText(text);
+
+        final storedCount = obs.count;
+        debugPrint('[RAG] Stored $storedCount chunks in ObjectBox');
+
+        setState(() => _chunkCount = storedCount);
+      } catch (e) {
+        debugPrint('[RAG] PDF chunking FAILED: $e');
+      }
+    } finally {
+      setState(() => _pickingPdf = false);
     }
   }
 
@@ -454,9 +465,14 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 FilledButton.icon(
-                  onPressed: _pickPdf,
-                  icon: const Icon(Icons.upload_file, size: 18),
-                  label: Text(_pdfFileName ?? 'Pick PDF'),
+                  onPressed: _pickingPdf ? null : _pickPdf,
+                  icon: _pickingPdf
+                      ? const SizedBox(
+                          width: 18, height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.upload_file, size: 18),
+                  label: Text(_pickingPdf ? 'Processing…' : (_pdfFileName ?? 'Pick PDF')),
                 ),
                 if (_pdfFileName != null) ...[
                   const SizedBox(height: 8),
