@@ -175,7 +175,12 @@ class SimpleTokenizer(vocabJsonPath: String, configJsonPath: String) {
         ids.add(startOfTurnId)
 
         val userContent = if (!context.isNullOrBlank()) {
-            "user\nYou are a precise document assistant. Answer using ONLY the provided document text.\n\nDOCUMENT:\n$context\n\nBased on the document above, answer this question: $userText"
+            "user\nYou are a precise document assistant. Follow these rules strictly:\n" +
+            "1. Answer ONLY using facts explicitly stated in the DOCUMENT below.\n" +
+            "2. Do NOT infer, assume, or add any information not present in the document.\n" +
+            "3. If the document mentions multiple related facts, include ALL of them.\n" +
+            "4. If the answer is not in the document, say \"The document does not contain this information.\"\n\n" +
+            "DOCUMENT:\n$context\n\nUsing ONLY the document above, answer this question: $userText"
         } else {
             "user\n$userText"
         }

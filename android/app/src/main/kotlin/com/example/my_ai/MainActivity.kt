@@ -31,7 +31,7 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "com.example.my_ai/executorch"
         private const val MAX_NEW_TOKENS = 300
         private const val SEQ_LEN = 4096
-        private const val TEMPERATURE = 0.7f
+        private const val TEMPERATURE = 0.1f
 
         /** EOS markers — if any of these appear as a token, stop generation. */
         private val EOS_TOKENS = listOf(
@@ -311,6 +311,9 @@ class MainActivity : FlutterActivity() {
                 val outputBuilder = StringBuilder()
                 val t0 = System.currentTimeMillis()
                 var tokenCount = 0
+                var lastToken = ""
+                var repeatCount = 0
+                val MAX_REPEATS = 4  // stop if same token repeats this many times
 
                 val callback = object : LlmCallback {
                     override fun onResult(token: String) {
@@ -322,6 +325,22 @@ class MainActivity : FlutterActivity() {
                                 try { llmModule?.stop() } catch (_: Exception) {}
                                 return
                             }
+
+                            // Detect degeneration loops (e.g. "from from from from...")
+                            val trimmed = token.trim()
+                            if (trimmed.isNotEmpty() && trimmed == lastToken.trim()) {
+                                repeatCount++
+                                if (repeatCount >= MAX_REPEATS) {
+                                    log("Repetition loop detected at token $tokenCount: \"$trimmed\" x$repeatCount — stopping")
+                                    stopRequested = true
+                                    try { llmModule?.stop() } catch (_: Exception) {}
+                                    return
+                                }
+                            } else {
+                                repeatCount = 0
+                            }
+                            lastToken = token
+
                             outputBuilder.append(token)
                             tokenCount++
 
@@ -356,7 +375,8 @@ class MainActivity : FlutterActivity() {
                 // Strip any remaining special tokens
                 output = stripSpecialTokens(output)
 
-
+                // Clean up any trailing repetition that slipped through
+                output = stripTrailingRepetition(output)
 
                 log("Generated $tokenCount tokens, ${output.length} chars in ${elapsed}ms")
                 if (elapsed > 0 && tokenCount > 0) {
@@ -388,6 +408,17 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /** System prompt for RAG document Q&A — shared between all chat templates. */
+    private fun ragSystemPrompt(): String = """
+You are a precise document assistant. Follow these rules strictly:
+1. Answer ONLY using facts explicitly stated in the DOCUMENT below.
+2. Do NOT infer, assume, or add any information not present in the document.
+3. If the document mentions multiple related facts (e.g. a stated reason AND an underlying motivation), include ALL of them.
+4. If the answer is not in the document, say "The document does not contain this information."
+5. Be concise but complete. Do not omit key details like numbers, names, or amounts.
+6. Think step-by-step: First, identify ALL sentences in the document relevant to the question. Second, extract every fact, number, and name from those sentences. Third, synthesize a complete answer using only those extracted facts.
+7. If the document contains multiple separate topics, cases, or records, answer using ONLY the one that matches the question. Never combine facts from unrelated sections.""".trimIndent()
+
     private fun formatLlama3(userText: String, context: String?): String {
         val sb = StringBuilder()
         sb.append("<|begin_of_text|>")
@@ -395,10 +426,7 @@ class MainActivity : FlutterActivity() {
         // System message
         sb.append("<|start_header_id|>system<|end_header_id|>\n\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a precise document assistant. Answer the user's question using ONLY the provided document text. ")
-            sb.append("Quote or reference specific parts of the document to support your answer. ")
-            sb.append("If the document does not contain enough information to answer, clearly state that. ")
-            sb.append("Be concise unless the user asks for detail.")
+            sb.append(ragSystemPrompt())
         } else {
             sb.append("You are a helpful assistant. Be concise and direct.")
         }
@@ -409,7 +437,7 @@ class MainActivity : FlutterActivity() {
         if (!context.isNullOrBlank()) {
             sb.append("DOCUMENT:\n")
             sb.append(context)
-            sb.append("\n\nBased on the document above, answer this question: ")
+            sb.append("\n\nUsing ONLY the document above, answer this question: ")
             sb.append(userText)
         } else {
             sb.append(userText)
@@ -425,12 +453,10 @@ class MainActivity : FlutterActivity() {
         val sb = StringBuilder()
         sb.append("<bos><start_of_turn>user\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a precise document assistant. Answer using ONLY the provided document text. ")
-            sb.append("Quote or reference specific parts to support your answer. ")
-            sb.append("If the document doesn't contain enough information, state that clearly.\n\n")
-            sb.append("DOCUMENT:\n")
+            sb.append(ragSystemPrompt())
+            sb.append("\n\nDOCUMENT:\n")
             sb.append(context)
-            sb.append("\n\nBased on the document above, answer this question: ")
+            sb.append("\n\nUsing ONLY the document above, answer this question: ")
             sb.append(userText)
         } else {
             sb.append(userText)
@@ -447,15 +473,48 @@ class MainActivity : FlutterActivity() {
         for (token in SPECIAL_TOKENS) {
             result = result.replace(token, "")
         }
-        // Also strip "user", "assistant", "model" that appear as role markers
-        // right after header tokens, but only if at start of output
+        // Strip role markers only when they appear as isolated labels
+        // (not as part of regular words like "User satisfaction" or "Model A")
+        result = result.trimStart()
         result = result
-            .trimStart()
-            .removePrefix("user")
-            .removePrefix("assistant")
-            .removePrefix("model")
+            .replaceFirst(Regex("^(user|assistant|model)\\s*[\n:]\\s*", RegexOption.IGNORE_CASE), "")
             .trim()
         return result
+    }
+
+    /**
+     * Detect and remove trailing word/phrase repetition (degeneration loops).
+     * E.g. "The answer is from from from from" → "The answer is from"
+     * Also handles multi-word patterns like "the contract the contract the contract".
+     */
+    private fun stripTrailingRepetition(text: String): String {
+        if (text.length < 20) return text
+
+        // Check for repeated patterns of 1-5 words at the end
+        val words = text.split(Regex("\\s+"))
+        if (words.size < 4) return text
+
+        for (patLen in 1..5) {
+            if (words.size < patLen * 3) continue
+            val pattern = words.takeLast(patLen).joinToString(" ")
+            var count = 0
+            var i = words.size
+            while (i >= patLen) {
+                val segment = words.subList(i - patLen, i).joinToString(" ")
+                if (segment == pattern) {
+                    count++
+                    i -= patLen
+                } else {
+                    break
+                }
+            }
+            if (count >= 3) {
+                // Keep one instance of the pattern, remove the rest
+                val keepUpTo = words.size - (count - 1) * patLen
+                return words.take(keepUpTo).joinToString(" ").trim()
+            }
+        }
+        return text
     }
 
     /**

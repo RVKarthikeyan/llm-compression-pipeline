@@ -255,53 +255,71 @@ class ChatNotifier extends Notifier<ChatState> {
     }
   }
 
-  /// Trim a chunk to fit within [maxLen] chars by extracting the most
-  /// relevant sentences (those containing query keywords).
+  /// Trim a chunk to fit within [maxLen] chars, keeping sentences in their
+  /// original reading order. Sentences near keyword-matching sentences are
+  /// preserved so surrounding context (e.g. dollar amounts near a topic)
+  /// is not lost.
   String _trimChunkToFit(String chunk, String query, int maxLen) {
     if (chunk.length <= maxLen) return chunk;
 
-    final queryLower = query.toLowerCase();
-    final queryWords = queryLower
+    const trimStopwords = {
+      'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'have',
+      'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
+      'may', 'might', 'can', 'for', 'and', 'but', 'not', 'with', 'from',
+      'about', 'into', 'what', 'which', 'who', 'how', 'why', 'when', 'where',
+      'this', 'that', 'these', 'those', 'its', 'his', 'her', 'our', 'their',
+    };
+
+    final queryWords = query.toLowerCase()
         .split(RegExp(r'\s+'))
-        .where((w) => w.length > 2)
+        .where((w) => w.length > 2 && !trimStopwords.contains(w))
         .toSet();
 
-    // Split into sentences
     final sentences = chunk.split(RegExp(r'(?<=[.!?\n])[\s]*'))
         .where((s) => s.trim().length > 5)
         .toList();
 
     if (sentences.isEmpty) return chunk.substring(0, maxLen);
 
-    // Score each sentence by how many query words it contains
-    final scored = <MapEntry<double, String>>[];
+    // Score each sentence: keyword hits + position bias + neighbor boost
+    final scores = List<double>.filled(sentences.length, 0);
     for (int i = 0; i < sentences.length; i++) {
       final sLower = sentences[i].toLowerCase();
-      double score = 0;
       for (final w in queryWords) {
-        if (sLower.contains(w)) score += 1;
+        if (sLower.contains(w)) scores[i] += 1.0;
       }
-      // Slight bias toward earlier sentences (often have names/headers)
-      score += (sentences.length - i) * 0.01;
-      scored.add(MapEntry(score, sentences[i]));
+      // Bias toward earlier sentences (headers, context setters)
+      scores[i] += (sentences.length - i) * 0.01;
     }
 
-    scored.sort((a, b) => b.key.compareTo(a.key));
+    // Boost neighbors: sentences adjacent to high-scoring ones get a bonus
+    // so that "Horizon canceled" pulls in the next sentence about "$15 million"
+    final boosted = List<double>.from(scores);
+    for (int i = 0; i < sentences.length; i++) {
+      if (scores[i] >= 1.0) {
+        if (i > 0) boosted[i - 1] += 0.5;
+        if (i < sentences.length - 1) boosted[i + 1] += 0.5;
+      }
+    }
 
-    // Build trimmed output from highest-scoring sentences in original order
-    final selected = <int, String>{};
+    // Build ranked list, pick top sentences that fit within budget
+    final indexed = List.generate(sentences.length, (i) => i);
+    indexed.sort((a, b) => boosted[b].compareTo(boosted[a]));
+
+    final selected = <int>{};
     int totalLen = 0;
-    for (final entry in scored) {
-      if (totalLen + entry.value.length + 1 > maxLen) continue;
-      final idx = sentences.indexOf(entry.value);
-      selected[idx] = entry.value;
-      totalLen += entry.value.length + 1;
+    for (final i in indexed) {
+      final len = sentences[i].length + 1;
+      if (totalLen + len > maxLen) continue;
+      selected.add(i);
+      totalLen += len;
     }
 
     if (selected.isEmpty) return chunk.substring(0, maxLen);
 
-    final sortedKeys = selected.keys.toList()..sort();
-    return sortedKeys.map((k) => selected[k]).join(' ');
+    // Return in original document order
+    final sortedKeys = selected.toList()..sort();
+    return sortedKeys.map((k) => sentences[k]).join(' ');
   }
 
   Future<void> sendMessage(String userText) async {
@@ -325,27 +343,52 @@ class ChatNotifier extends Notifier<ChatState> {
     // For larger docs, use DB-level keyword pre-filter first.
     List<String> contextChunks;
     if (totalChunks > 0 && totalChunks <= 30) {
-      contextChunks = obs.scoredSearchAll(userText);
+      contextChunks = obs.scoredSearchAll(userText, limit: 5);
       debugPrint('[RAG] Scored ALL $totalChunks chunks → ${contextChunks.length} selected');
     } else {
-      contextChunks = obs.searchContext(userText);
+      contextChunks = obs.searchContext(userText, limit: 4);
       debugPrint('[RAG] DB search → ${contextChunks.length} chunks');
     }
     final hasContext = contextChunks.isNotEmpty;
 
-    // Build context string, capped at 2000 chars to fit within
-    // model's actual max_context_len with prompt overhead.
-    // Smart trimming: if a chunk is very large but only partly relevant,
-    // include just the most relevant portion to maximize information density.
+    // Build context string capped at ~3000 tokens (~12000 chars).
+    // Model has SEQ_LEN=4096 tokens. Budget:
+    //   system prompt ≈ 200 tokens, user query ≈ 50 tokens,
+    //   MAX_NEW_TOKENS=300 → ~3500 tokens available for context.
+    //   At ~4 chars/token, cap at 12000 chars for safety.
+    // Overlapping text between adjacent chunks is deduplicated to avoid
+    // wasting tokens on repeated content.
+    const contextCharCap = 12000;
     String? ctx;
+    final usedChunks = <String>[];
     if (hasContext) {
       final buf = StringBuffer();
-      int chunksUsed = 0;
       for (final chunk in contextChunks) {
-        final remaining = 2000 - buf.length;
+        final remaining = contextCharCap - buf.length;
         if (remaining < 50 && buf.isNotEmpty) break;
 
         String toAdd = chunk;
+
+        // Deduplicate overlap: if the end of current buffer overlaps with
+        // the start of this chunk, skip the overlapping portion.
+        if (buf.isNotEmpty && toAdd.length > 100) {
+          final existing = buf.toString();
+          final overlapCheck = existing.length > 500
+              ? existing.substring(existing.length - 500)
+              : existing;
+          // Find the longest suffix of existing text that matches a prefix of toAdd
+          int bestOverlap = 0;
+          for (int len = 50; len <= overlapCheck.length && len <= toAdd.length; len++) {
+            if (overlapCheck.endsWith(toAdd.substring(0, len))) {
+              bestOverlap = len;
+            }
+          }
+          if (bestOverlap >= 50) {
+            toAdd = toAdd.substring(bestOverlap).trimLeft();
+            if (toAdd.isEmpty) continue;
+          }
+        }
+
         // If chunk is too large for remaining budget, try to extract
         // the most relevant sentences from it
         if (toAdd.length > remaining && buf.isNotEmpty) {
@@ -355,10 +398,10 @@ class ChatNotifier extends Notifier<ChatState> {
 
         if (buf.isNotEmpty) buf.write('\n\n');
         buf.write(toAdd);
-        chunksUsed++;
+        usedChunks.add(chunk);
       }
       ctx = buf.toString();
-      debugPrint('[RAG] Context: ${ctx.length} chars, $chunksUsed chunks used');
+      debugPrint('[RAG] Context: ${ctx.length} chars, ${usedChunks.length} chunks used');
       debugPrint('[RAG] Preview: ${ctx.substring(0, ctx.length < 200 ? ctx.length : 200)}');
     } else {
       debugPrint('[RAG] NO context found!');
@@ -375,7 +418,7 @@ class ChatNotifier extends Notifier<ChatState> {
         ChatMessage(
           role: 'ai',
           content: '',
-          ragContext: hasContext ? contextChunks : null,
+          ragContext: usedChunks.isNotEmpty ? usedChunks : null,
           noContextWarning: !hasContext,
         ),
       ],
@@ -428,7 +471,7 @@ class ChatNotifier extends Notifier<ChatState> {
       msgs[msgs.length - 1] = ChatMessage(
         role: 'ai',
         content: aiResponse,
-        ragContext: hasContext ? contextChunks : null,
+        ragContext: usedChunks.isNotEmpty ? usedChunks : null,
         noContextWarning: !hasContext,
       );
     }

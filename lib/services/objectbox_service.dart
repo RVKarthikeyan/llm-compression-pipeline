@@ -40,11 +40,65 @@ class ObjectBoxService {
     _box.putMany(entities);
   }
 
+  /// Cleans raw extracted text by stripping markdown artifacts, normalizing
+  /// whitespace, and removing common PDF extraction noise.
+  String _sanitizeText(String text) {
+    var t = text;
+
+    // 0. Normalize PDF-specific artifacts first
+    // Smart quotes → plain quotes (PDFs often use these)
+    t = t.replaceAll('\u201C', '"').replaceAll('\u201D', '"');  // " "
+    t = t.replaceAll('\u2018', "'").replaceAll('\u2019', "'");  // ' '
+    // Non-breaking spaces → regular spaces
+    t = t.replaceAll('\u00A0', ' ');
+    // Common ligatures from PDF text extraction
+    t = t.replaceAll('\uFB01', 'fi').replaceAll('\uFB02', 'fl');
+    t = t.replaceAll('\uFB03', 'ffi').replaceAll('\uFB04', 'ffl');
+    // Em/en dashes → hyphens
+    t = t.replaceAll('\u2013', '-').replaceAll('\u2014', '-');
+    // Ellipsis character → three dots
+    t = t.replaceAll('\u2026', '...');
+
+    // 1. Rejoin hyphenated line breaks (e.g. "con-\ntract" → "contract")
+    t = t.replaceAll(RegExp(r'(\w)-\n(\w)'), r'$1$2');
+
+    // 2. Strip markdown bold/italic markers: **text**, __text__, *text*, _text_
+    //    Process longer markers first to avoid partial replacements.
+    t = t.replaceAll(RegExp(r'\*{2,3}'), '');
+    t = t.replaceAll(RegExp(r'_{2,3}'), '');
+    // Single * or _ used as emphasis (word-bounded to avoid removing bullets)
+    t = t.replaceAllMapped(
+      RegExp(r'(?<=\s|^)[*_](\S(?:.*?\S)?)[*_](?=\s|$|[.,;:!?])'),
+      (m) => m.group(1)!,
+    );
+
+    // 3. Strip markdown headings (# Heading → Heading)
+    t = t.replaceAll(RegExp(r'^#{1,6}\s+', multiLine: true), '');
+
+    // 4. Convert markdown links [text](url) → text
+    t = t.replaceAllMapped(RegExp(r'\[([^\]]+)\]\([^)]+\)'), (m) => m.group(1)!);
+
+    // 5. Strip markdown image references ![alt](url)
+    t = t.replaceAll(RegExp(r'!\[[^\]]*\]\([^)]+\)'), '');
+
+    // 6. Remove standalone page numbers (e.g. lines that are just "12" or "Page 12")
+    t = t.replaceAll(RegExp(r'^\s*(?:Page\s*)?\d{1,4}\s*$', multiLine: true, caseSensitive: false), '');
+
+    // 7. Normalize whitespace: collapse 3+ newlines into 2, multiple spaces into 1
+    t = t.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+    t = t.replaceAll(RegExp(r'[^\S\n]{2,}'), ' ');
+
+    return t.trim();
+  }
+
   /// Smart chunking: splits raw text into semantically meaningful chunks
   /// with overlap so boundary data isn't lost.
   /// Works for any document type: legal, medical, technical, academic, etc.
   Future<void> replaceChunksFromText(String text) async {
     _box.removeAll();
+
+    // Sanitize text before chunking: strip markdown, normalize whitespace, etc.
+    final cleanText = _sanitizeText(text);
 
     final chunks = <String>[];
 
@@ -60,14 +114,14 @@ class ObjectBoxService {
       caseSensitive: false,
       multiLine: true,
     );
-    final sections = text.split(sectionPattern)
+    final sections = cleanText.split(sectionPattern)
         .map((s) => s.trim())
         .where((s) => s.length > 20)
         .toList();
 
     if (sections.length >= 3) {
       for (final section in sections) {
-        if (section.length <= 1200) {
+        if (section.length <= 2000) {
           chunks.add(section.trim());
         } else {
           // Split oversized sections on paragraph boundaries
@@ -77,11 +131,11 @@ class ObjectBoxService {
               .toList();
           String buffer = '';
           for (final para in paras) {
-            if (buffer.isNotEmpty && buffer.length + para.length > 1200) {
+            if (buffer.isNotEmpty && buffer.length + para.length > 2000) {
               chunks.add(buffer.trim());
-              // Overlap: keep last ~200 chars of previous chunk
-              final overlap = buffer.length > 200
-                  ? buffer.substring(buffer.length - 200)
+              // Overlap: keep last ~400 chars of previous chunk
+              final overlap = buffer.length > 400
+                  ? buffer.substring(buffer.length - 400)
                   : buffer;
               buffer = '$overlap\n\n$para';
             } else {
@@ -96,7 +150,7 @@ class ObjectBoxService {
     // 2. If section-based splitting didn't produce enough chunks, try paragraphs
     if (chunks.length < 3) {
       chunks.clear();
-      final paragraphs = text.split(RegExp(r'\n\s*\n'))
+      final paragraphs = cleanText.split(RegExp(r'\n\s*\n'))
           .map((s) => s.trim())
           .where((s) => s.length > 20)
           .toList();
@@ -105,12 +159,12 @@ class ObjectBoxService {
         String buffer = '';
         for (final para in paragraphs) {
           if (buffer.isNotEmpty &&
-              buffer.length + para.length > 800 &&
-              buffer.length > 100) {
+              buffer.length + para.length > 1500 &&
+              buffer.length > 200) {
             chunks.add(buffer.trim());
-            // Overlap
-            final overlap = buffer.length > 150
-                ? buffer.substring(buffer.length - 150)
+            // Overlap: keep last ~300 chars to preserve context across boundaries
+            final overlap = buffer.length > 300
+                ? buffer.substring(buffer.length - 300)
                 : buffer;
             buffer = '$overlap\n\n$para';
           } else {
@@ -121,19 +175,23 @@ class ObjectBoxService {
       }
     }
 
-    // 3. Final fallback: split by sentences, grouped into ~600-char chunks
+    // 3. Final fallback: split by sentences, grouped into ~1000-char chunks
     if (chunks.length < 3) {
       chunks.clear();
-      final sentences = text.split(RegExp(r'(?<=[.!?])\s+'))
+      final sentences = cleanText.split(RegExp(r'(?<=[.!?])\s+'))
           .where((s) => s.trim().length > 5)
           .toList();
       String buffer = '';
       for (final sent in sentences) {
         if (buffer.isNotEmpty &&
-            buffer.length + sent.length > 600 &&
-            buffer.length > 100) {
+            buffer.length + sent.length > 1000 &&
+            buffer.length > 200) {
           chunks.add(buffer.trim());
-          buffer = sent;
+          // Overlap: keep last 2 sentences worth (~200 chars)
+          final overlapStart = buffer.lastIndexOf('. ', buffer.length - 200);
+          buffer = overlapStart >= 0
+              ? '${buffer.substring(overlapStart + 2)} $sent'
+              : sent;
         } else {
           buffer = buffer.isEmpty ? sent : '$buffer $sent';
         }
@@ -142,8 +200,28 @@ class ObjectBoxService {
     }
 
     // 4. If still nothing, store the whole text as one chunk
-    if (chunks.isEmpty && text.trim().length > 20) {
-      chunks.add(text.trim());
+    if (chunks.isEmpty && cleanText.length > 20) {
+      chunks.add(cleanText);
+    }
+
+    // 5. Merge undersized chunks (< 200 chars) with their neighbor so we
+    //    don't produce dozens of tiny fragments from short paragraphs.
+    if (chunks.length > 1) {
+      final merged = <String>[];
+      String buffer = chunks.first;
+      for (int i = 1; i < chunks.length; i++) {
+        if (buffer.length < 200) {
+          // Too small — merge with next chunk
+          buffer = '$buffer\n\n${chunks[i]}';
+        } else {
+          merged.add(buffer);
+          buffer = chunks[i];
+        }
+      }
+      if (buffer.isNotEmpty) merged.add(buffer);
+      chunks
+        ..clear()
+        ..addAll(merged);
     }
 
     final entities = chunks.map((t) => DocumentChunk(text: t)).toList();
@@ -223,9 +301,9 @@ class ObjectBoxService {
       }
 
       // Prefix stem matching: 'prescri' matches 'prescribed', 'prescription'
-      // Only for words ≥5 chars: use first 5+ chars as stem
+      // Stems are clamped to 4-6 chars to align with _scoreChunk's prefix logic
       if (kw.length >= 6 && !kw.contains(' ')) {
-        expanded.add(kw.substring(0, (kw.length * 0.7).ceil().clamp(4, kw.length)));
+        expanded.add(kw.substring(0, kw.length.clamp(4, 6)));
       }
     }
 
@@ -234,7 +312,26 @@ class ObjectBoxService {
 
   /// Extract keywords from a query: unigrams + bigrams + entity patterns.
   List<String> _extractKeywords(String query) {
-    // Clean the query
+    final keywords = <String>{};
+
+    // 0. Extract dollar amounts and decimal numbers BEFORE cleaning
+    //    e.g. "$15 million", "$2.5", "12.5%", "3.14"
+    final moneyPattern = RegExp(
+      r'\$\s*[\d,.]+\s*(?:million|billion|thousand|k|m|b)?'
+      r'|[\d,.]+\s*(?:million|billion|thousand|percent|%)',
+      caseSensitive: false,
+    );
+    for (final m in moneyPattern.allMatches(query)) {
+      keywords.add(m.group(0)!.replaceAll(RegExp(r'\s+'), ' ').toLowerCase());
+    }
+
+    // Also preserve standalone decimal numbers like "12.5", "3.14"
+    final decimalPattern = RegExp(r'\d+\.\d+');
+    for (final m in decimalPattern.allMatches(query)) {
+      keywords.add(m.group(0)!);
+    }
+
+    // Clean the query for general keyword extraction
     final clean = query
         .replaceAll(RegExp(r"[''`]"), ' ')
         .replaceAll(RegExp(r'[^\w\s\d()-]'), ' ');
@@ -243,8 +340,6 @@ class ObjectBoxService {
     final rawWords = clean.split(RegExp(r'\s+'))
         .where((w) => w.length > 1)
         .toList();
-
-    final keywords = <String>{};
 
     // 1. Add unigrams (lowercased, without stopwords)
     final unigrams = rawWords
@@ -294,6 +389,7 @@ class ObjectBoxService {
   double _scoreChunk(String chunkText, List<String> keywords) {
     final lower = chunkText.toLowerCase();
     double score = 0;
+    int matchedCount = 0;
 
     for (final kw in keywords) {
       // For prefix stems: check if any word in text starts with the keyword
@@ -306,11 +402,21 @@ class ObjectBoxService {
       }
       if (!matched) continue;
 
+      matchedCount++;
+
       final isBigram = kw.contains(' ');
       final isNumber = RegExp(r'^\d+$').hasMatch(kw);
+      final isMoney = kw.contains('\$') || kw.contains('million') ||
+          kw.contains('billion') || kw.contains('thousand');
+      final isDecimal = RegExp(r'^\d+\.\d+$').hasMatch(kw);
 
-      // Base score: bigrams worth more (phrase match), numbers moderate
-      double kwScore = isBigram ? 3.0 : (isNumber ? 0.5 : 1.0);
+      // Base score: money/decimal worth most (very specific), bigrams high,
+      // plain numbers moderate, regular words baseline
+      double kwScore = (isMoney || isDecimal)
+          ? 4.0
+          : isBigram
+              ? 3.0
+              : (isNumber ? 0.5 : 1.0);
 
       // Count occurrences
       int count = 0;
@@ -331,14 +437,6 @@ class ObjectBoxService {
 
     // Bonus for matching a higher fraction of all keywords
     if (score > 0 && keywords.isNotEmpty) {
-      int matchedCount = 0;
-      for (final kw in keywords) {
-        if (kw.length >= 4 && kw.length <= 6 && !kw.contains(' ')) {
-          if (RegExp('\\b${RegExp.escape(kw)}').hasMatch(lower)) matchedCount++;
-        } else if (lower.contains(kw)) {
-          matchedCount++;
-        }
-      }
       score += (matchedCount / keywords.length) * 2.0;
     }
 
@@ -365,55 +463,58 @@ class ObjectBoxService {
            lower.contains('highlight');
   }
 
-  /// Returns up to [limit] chunks whose text contains any keyword from [query].
-  /// Uses n-gram matching, entity detection, synonym expansion, and weighted scoring.
+  /// Returns up to [limit] chunks whose text matches keywords from [query].
+  /// Uses n-gram matching, entity detection, synonym expansion, weighted scoring,
+  /// and neighbor retrieval (index-based) to preserve boundary context.
   List<String> searchContext(String query, {int limit = 5}) {
     final rawKeywords = _extractKeywords(query);
     final keywords = _expandKeywords(rawKeywords);
     final broad = _isBroadQuery(query);
     final effectiveLimit = broad ? limit + 3 : limit;
 
+    final all = _box.getAll();
+    if (all.isEmpty) return [];
+
     if (keywords.isEmpty) {
-      return _box.getAll().take(effectiveLimit).map((e) => e.text).toList();
+      return all.take(effectiveLimit).map((e) => e.text).toList();
     }
 
-    // Build OR condition for all single-word keywords (DB-level pre-filter)
-    Condition<DocumentChunk>? condition;
-    for (final kw in keywords) {
-      if (kw.contains(' ')) continue; // skip bigrams for DB filter
-      if (kw.length < 3) continue;
-      final c = DocumentChunk_.text.contains(kw, caseSensitive: false);
-      condition = condition == null ? c : condition.or(c);
+    // Score every chunk
+    final scores = <int, double>{};
+    for (int i = 0; i < all.length; i++) {
+      scores[i] = _scoreChunk(all[i].text, keywords);
     }
 
-    // If only bigrams, use the individual words for DB filter
-    if (condition == null) {
-      for (final kw in keywords) {
-        for (final word in kw.split(' ')) {
-          if (word.length > 2) {
-            final c = DocumentChunk_.text.contains(word, caseSensitive: false);
-            condition = condition == null ? c : condition.or(c);
-          }
-        }
-      }
+    // Rank by score
+    final ranked = scores.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    // Collect top hits + their immediate neighbors (index-based, not ID-based)
+    final selected = <int>{};
+    int added = 0;
+    for (final entry in ranked) {
+      if (entry.value < 1.0) break;
+      if (added >= effectiveLimit) break;
+      if (selected.add(entry.key)) added++;
+      if (entry.key > 0) selected.add(entry.key - 1);
+      if (entry.key < all.length - 1) selected.add(entry.key + 1);
     }
 
-    if (condition == null) {
-      return _box.getAll().take(effectiveLimit).map((e) => e.text).toList();
+    if (selected.isEmpty) {
+      return all.take(effectiveLimit).map((e) => e.text).toList();
     }
 
-    final results = _box.query(condition).build().find();
+    // Cap to effectiveLimit by re-scoring if neighbors pushed us over
+    final sorted = selected.toList()..sort();
+    if (sorted.length > effectiveLimit) {
+      final reScored = sorted.map((i) {
+        return MapEntry(scores[i] ?? 0.0, i);
+      }).toList()..sort((a, b) => b.key.compareTo(a.key));
+      final kept = reScored.take(effectiveLimit).map((e) => e.value).toList()..sort();
+      return kept.map((i) => all[i].text).toList();
+    }
 
-    final scored = results.map((chunk) {
-      return MapEntry(_scoreChunk(chunk.text, keywords), chunk);
-    }).toList()
-      ..sort((a, b) => b.key.compareTo(a.key));
-
-    return scored
-        .where((e) => e.key > 0)
-        .take(effectiveLimit)
-        .map((e) => e.value.text)
-        .toList();
+    return sorted.map((i) => all[i].text).toList();
   }
 
   /// Total number of stored chunks.
@@ -421,6 +522,8 @@ class ObjectBoxService {
 
   /// Scores ALL chunks against [query] using n-grams, entities, synonyms,
   /// and weighted scoring. For small documents (≤30 chunks).
+  /// Also pulls neighbor chunks (before/after top hits) so context that
+  /// spans a chunk boundary is never lost.
   List<String> scoredSearchAll(String query, {int limit = 5}) {
     final all = _box.getAll();
     if (all.isEmpty) return [];
@@ -434,23 +537,45 @@ class ObjectBoxService {
       return all.take(effectiveLimit).map((e) => e.text).toList();
     }
 
-    final scored = all.map((chunk) {
-      return MapEntry(_scoreChunk(chunk.text, keywords), chunk.text);
-    }).toList()
-      ..sort((a, b) => b.key.compareTo(a.key));
+    // Score every chunk
+    final scores = <int, double>{};
+    for (int i = 0; i < all.length; i++) {
+      scores[i] = _scoreChunk(all[i].text, keywords);
+    }
 
-    // Return chunks that matched at least one keyword, up to limit
-    final results = scored
-        .where((e) => e.key > 0)
-        .take(effectiveLimit)
-        .map((e) => e.value)
-        .toList();
+    // Find top-scoring indices
+    final ranked = scores.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
 
-    // If nothing matched, return first few chunks as fallback
-    if (results.isEmpty) {
+    // Collect top hits + their immediate neighbors (for boundary context)
+    final selected = <int>{};
+    int added = 0;
+    for (final entry in ranked) {
+      if (entry.value < 1.0) break;
+      if (added >= effectiveLimit) break;
+      if (selected.add(entry.key)) added++;
+      // Pull neighbor before and after so related facts aren't lost
+      if (entry.key > 0) selected.add(entry.key - 1);
+      if (entry.key < all.length - 1) selected.add(entry.key + 1);
+    }
+
+    if (selected.isEmpty) {
       return all.take(effectiveLimit).map((e) => e.text).toList();
     }
-    return results;
+
+    // Return in document order, capped to effectiveLimit
+    final sorted = selected.toList()..sort();
+
+    // If neighbors pushed us over the limit, re-score and keep the best
+    if (sorted.length > effectiveLimit) {
+      final reScored = sorted.map((i) {
+        return MapEntry(scores[i] ?? 0.0, i);
+      }).toList()..sort((a, b) => b.key.compareTo(a.key));
+      final kept = reScored.take(effectiveLimit).map((e) => e.value).toList()..sort();
+      return kept.map((i) => all[i].text).toList();
+    }
+
+    return sorted.map((i) => all[i].text).toList();
   }
 
   /// Returns the first [n] chunk texts for preview purposes.
