@@ -16,9 +16,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import pytesseract
+import fitz
 import wandb
-from pdf2image import convert_from_path
 from tqdm import tqdm
 from huggingface_hub import login
 from transformers import (
@@ -49,14 +48,12 @@ def _set_seed(seed: int):
 
 
 def _extract_pdf_text(pdf_path: str) -> str:
-    """Convert PDF pages to images and run OCR to extract text."""
-    images = convert_from_path(pdf_path, dpi=200)
+    """Extract text from PDF pages using PyMuPDF."""
+    doc = fitz.open(pdf_path)
     full_text = ""
-    for img in tqdm(images, desc="OCR processing"):
-        try:
-            full_text += pytesseract.image_to_string(img, lang="eng") + "\n"
-        except Exception:
-            continue
+    for page in tqdm(doc, desc="Extracting text"):
+        full_text += page.get_text() + "\n"
+    doc.close()
 
     full_text = re.sub(r"\s+", " ", full_text)
     full_text = re.sub(r"Page \d+", "", full_text)

@@ -300,7 +300,7 @@ async def generate_embeddings(
     with open(pdf_path, "wb") as f:
         shutil.copyfileobj(pdf_file.file, f)
 
-    # Extract text via OCR
+    # Extract text from PDF
     try:
         full_text = _extract_pdf_text(pdf_path)
     except Exception as e:

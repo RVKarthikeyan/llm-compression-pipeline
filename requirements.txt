@@ -5,8 +5,7 @@ transformers
 accelerate
 bitsandbytes
 tqdm
-pytesseract
-pdf2image
+PyMuPDF
 datasets
 peft
 trl
