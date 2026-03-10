@@ -20,3 +20,4 @@ uvicorn
 python-multipart
 scipy
 wandb
+sentence-transformers

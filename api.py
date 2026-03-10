@@ -2,16 +2,23 @@ import os
 import hashlib
 import shutil
 import uuid
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, Form, File, UploadFile, HTTPException, BackgroundTasks
 from huggingface_hub import HfApi, login, create_repo
+from sentence_transformers import SentenceTransformer
 
 from llama_3_2_1b_instruct_prunned import run_pruning_pipeline
-from llmcompression_llama import run_knowledge_distillation
+from llmcompression_llama import run_knowledge_distillation, _extract_pdf_text, _chunk_text
 from mixed_precision_llama import run_mixed_precision_export
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Llama Model Compression Pipeline API")
+
+# Load embedding model at startup (384-dim, ~80 MB)
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Configuration
 BASE_DIR = Path("workspace")
@@ -256,6 +263,80 @@ async def pipeline_status(hf_token: str):
         "status": job["status"],
         "message": job["message"],
         "pte_ready": pte_ready,
+    }
+
+
+@app.post("/embed")
+async def generate_embeddings(
+    hf_token: str = Form(...),
+    pdf_file: UploadFile = File(...),
+    chunk_size: int = Form(500),
+    chunk_overlap: int = Form(50),
+):
+    """Extract text from a PDF, chunk it, and return embeddings for each chunk.
+
+    The returned embeddings are float32 vectors (384 dimensions) suitable for
+    storage in ObjectBox with @HnswIndex(dimensions: 384).
+
+    Parameters
+    ----------
+    hf_token : str
+        HuggingFace token (must be authenticated via /auth first).
+    pdf_file : UploadFile
+        PDF document to embed.
+    chunk_size : int
+        Character length per chunk (default 500).
+    chunk_overlap : int
+        Number of overlapping characters between consecutive chunks (default 50).
+    """
+    hashed = hash_token(hf_token)
+
+    if hashed not in user_sessions:
+        raise HTTPException(status_code=401, detail="Please authenticate first via /auth.")
+
+    # Save uploaded PDF
+    user_dir = get_user_dir(hashed)
+    pdf_path = str(user_dir / pdf_file.filename)
+    with open(pdf_path, "wb") as f:
+        shutil.copyfileobj(pdf_file.file, f)
+
+    # Extract text via OCR
+    try:
+        full_text = _extract_pdf_text(pdf_path)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to extract text from PDF: {e}")
+    finally:
+        os.remove(pdf_path)
+
+    if not full_text.strip():
+        raise HTTPException(status_code=422, detail="No text could be extracted from the PDF.")
+
+    # Chunk with overlap
+    chunks = []
+    step = max(chunk_size - chunk_overlap, 1)
+    for i in range(0, len(full_text), step):
+        chunk = full_text[i : i + chunk_size]
+        if len(chunk) > chunk_size // 4:
+            chunks.append(chunk)
+
+    if not chunks:
+        raise HTTPException(status_code=422, detail="PDF text too short to produce any chunks.")
+
+    # Generate embeddings
+    embeddings = embedding_model.encode(chunks, show_progress_bar=False, normalize_embeddings=True)
+
+    return {
+        "model": "all-MiniLM-L6-v2",
+        "dimensions": 384,
+        "count": len(chunks),
+        "chunks": [
+            {
+                "index": i,
+                "text": chunk,
+                "embedding": emb.tolist(),
+            }
+            for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+        ],
     }
 
 
