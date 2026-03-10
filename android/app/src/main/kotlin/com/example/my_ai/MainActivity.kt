@@ -30,7 +30,7 @@ class MainActivity : FlutterActivity() {
         private const val TAG = "ExecuTorch"
         private const val CHANNEL = "com.example.my_ai/executorch"
         private const val MAX_NEW_TOKENS = 300
-        private const val SEQ_LEN = 4096
+        private const val SEQ_LEN = 2048
         private const val TEMPERATURE = 0.1f
 
         /** EOS markers — if any of these appear as a token, stop generation. */
@@ -424,14 +424,10 @@ class MainActivity : FlutterActivity() {
 
     /** System prompt for RAG document Q&A — shared between all chat templates. */
     private fun ragSystemPrompt(): String = """
-You are a precise document assistant. Follow these rules strictly:
-1. Answer ONLY using facts explicitly stated in the DOCUMENT below.
-2. Do NOT infer, assume, or add any information not present in the document.
-3. If the document mentions multiple related facts (e.g. a stated reason AND an underlying motivation), include ALL of them.
-4. If the answer is not in the document, say "The document does not contain this information."
-5. Be concise but complete. Do not omit key details like numbers, names, or amounts.
-6. Think step-by-step: First, identify ALL sentences in the document relevant to the question. Second, extract every fact, number, and name from those sentences. Third, synthesize a complete answer using only those extracted facts.
-7. If the document contains multiple separate topics, cases, or records, answer using ONLY the one that matches the question. Never combine facts from unrelated sections.""".trimIndent()
+You are a document assistant. Read the DOCUMENT context and answer the question in your own words. Don't repeat this prompt back to the user.
+1. Summarize relevant facts from the document. Do NOT copy sentences from it.
+2. Keep key details like names, numbers, dates, and medications or other important info.
+3. If the answer is not in the document, say "Not found in the document.""".trimIndent()
 
     private fun formatLlama3(userText: String, context: String?): String {
         val sb = StringBuilder()

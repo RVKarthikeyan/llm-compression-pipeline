@@ -57,11 +57,17 @@ class ObjectBoxService {
   /// Returns up to [limit] chunks whose embeddings are nearest to [queryEmbedding].
   ///
   /// Uses ObjectBox HNSW index for fast approximate nearest-neighbor search
-  /// with cosine distance. Also pulls immediate neighbor chunks (by stored
-  /// order) to preserve context that spans chunk boundaries.
+  /// with cosine distance. Results above [_scoreThreshold] are discarded to
+  /// avoid injecting irrelevant context. Also pulls immediate neighbor chunks
+  /// (by stored order) to preserve context that spans chunk boundaries.
   ///
   /// [queryEmbedding] must be a 384-dim float vector (from the on-device
   /// ONNX embedding model).
+  /// Maximum cosine distance for a chunk to be considered relevant.
+  /// ObjectBox cosine distance: 0.0 = identical, 2.0 = opposite.
+  /// 0.5 keeps only chunks that are meaningfully similar to the query.
+  static const double _scoreThreshold = 0.6;
+
   List<String> searchByVector(List<double> queryEmbedding, {int limit = 5}) {
     final totalChunks = _box.count();
     if (totalChunks == 0) return [];
@@ -80,12 +86,28 @@ class ObjectBoxService {
         return _box.getAll().take(limit).map((e) => e.text).toList();
       }
 
-      debugPrint('[OBX] HNSW search returned ${results.length} results');
+      debugPrint(
+        '[OBX] HNSW search returned ${results.length} results (before filtering)',
+      );
       for (final r in results) {
         debugPrint(
           '[OBX]   id=${r.object.id}, score=${r.score.toStringAsFixed(4)}, '
           'text="${r.object.text.substring(0, r.object.text.length < 60 ? r.object.text.length : 60)}..."',
         );
+      }
+
+      // Filter out chunks with weak similarity (high cosine distance)
+      final filtered = results
+          .where((r) => r.score <= _scoreThreshold)
+          .toList();
+      debugPrint(
+        '[OBX] After score threshold ($_scoreThreshold): ${filtered.length}/${results.length} kept',
+      );
+
+      if (filtered.isEmpty) {
+        // All results were below threshold — fall back to the single best hit
+        debugPrint('[OBX] No results passed threshold, using best hit only');
+        return [results.first.object.text];
       }
 
       // Collect hit IDs and find their indices in stored order for neighbor retrieval
@@ -97,7 +119,7 @@ class ObjectBoxService {
 
       // Gather top hits + their immediate neighbors
       final selected = <int>{};
-      for (final r in results) {
+      for (final r in filtered) {
         final idx = idToIndex[r.object.id];
         if (idx == null) continue;
         selected.add(idx);
@@ -109,7 +131,7 @@ class ObjectBoxService {
       var sorted = selected.toList()..sort();
       if (sorted.length > limit) {
         // Re-score by HNSW distance (lower = better for cosine)
-        final hitIds = {for (final r in results) r.object.id: r.score};
+        final hitIds = {for (final r in filtered) r.object.id: r.score};
         sorted.sort((a, b) {
           final scoreA = hitIds[all[a].id] ?? double.infinity;
           final scoreB = hitIds[all[b].id] ?? double.infinity;
