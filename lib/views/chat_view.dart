@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../providers/app_providers.dart';
 
@@ -54,6 +55,46 @@ class _ChatViewState extends ConsumerState<ChatView>
     _ctrl.clear();
     await ref.read(chatProvider.notifier).sendMessage(text);
     _scrollToBottom();
+  }
+
+  /// Pick a PDF and load it into the knowledge base for RAG.
+  Future<void> _selectKnowledge() async {
+    final res = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf', 'txt'],
+      dialogTitle: 'Select Knowledge PDF',
+    );
+    if (res == null) return;
+
+    final file = File(res.files.single.path!);
+    final fileName = res.files.single.name;
+
+    try {
+      String text;
+      if (fileName.toLowerCase().endsWith('.pdf')) {
+        final doc = PdfDocument(inputBytes: file.readAsBytesSync());
+        text = PdfTextExtractor(doc).extractText();
+        doc.dispose();
+      } else {
+        text = await file.readAsString();
+      }
+
+      final obs = ref.read(objectBoxProvider);
+      await obs.replaceChunksFromText(text);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Loaded "$fileName" — ${obs.count} chunks stored'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load PDF: $e')),
+      );
+    }
   }
 
   Future<void> _loadModel() async {
@@ -174,6 +215,12 @@ class _ChatViewState extends ConsumerState<ChatView>
         foregroundColor: const Color(0xFF1A1A2E),
         elevation: 0,
         actions: [
+          // Select Knowledge PDF button — always enabled
+          IconButton(
+            icon: const Icon(Icons.menu_book_outlined, size: 20),
+            onPressed: _selectKnowledge,
+            tooltip: 'Select Knowledge',
+          ),
           if (chat.messages.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
@@ -519,12 +566,14 @@ class _Bubble extends StatelessWidget {
                       Icon(Icons.warning_amber_rounded,
                           size: 14, color: Color(0xFFF9A825)),
                       SizedBox(width: 4),
-                      Text(
-                        'No relevant context found — answering from model knowledge',
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: Color(0xFFF57F17),
-                          fontWeight: FontWeight.w500,
+                      Flexible(
+                        child: Text(
+                          'No relevant context found — answering from model knowledge',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFFF57F17),
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
                       ),
                     ],

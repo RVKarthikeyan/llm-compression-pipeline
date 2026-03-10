@@ -40,21 +40,135 @@ class ObjectBoxService {
     _box.putMany(entities);
   }
 
+  /// Smart chunking: splits raw text into semantically meaningful chunks,
+  /// preserving patient sections or large logical blocks.
+  Future<void> replaceChunksFromText(String text) async {
+    _box.removeAll();
+
+    final chunks = <String>[];
+
+    // 1. Try splitting by patient section headers (e.g. "Patient 1", "Patient Information")
+    final sectionPattern = RegExp(
+      r'(?=Patient\s+\d+|Patient\s+Information|Apex\s+Healthcare)',
+      caseSensitive: false,
+    );
+    final sections = text.split(sectionPattern)
+        .map((s) => s.trim())
+        .where((s) => s.length > 20)
+        .toList();
+
+    if (sections.length >= 3) {
+      // Merge small consecutive sections that belong together.
+      // Each "Patient N" header + its data block becomes one chunk.
+      String buffer = '';
+      for (final section in sections) {
+        if (buffer.isNotEmpty &&
+            buffer.length + section.length > 2500 &&
+            buffer.length > 200) {
+          chunks.add(buffer.trim());
+          buffer = section;
+        } else {
+          buffer = buffer.isEmpty ? section : '$buffer\n$section';
+        }
+      }
+      if (buffer.trim().length > 20) chunks.add(buffer.trim());
+    }
+
+    // 2. If section-based splitting didn't produce enough chunks, try paragraphs
+    if (chunks.length < 3) {
+      chunks.clear();
+      final paragraphs = text.split(RegExp(r'\n\s*\n'))
+          .map((s) => s.trim())
+          .where((s) => s.length > 20)
+          .toList();
+
+      if (paragraphs.length >= 3) {
+        // Merge tiny paragraphs into bigger chunks (~1500 chars each)
+        String buffer = '';
+        for (final para in paragraphs) {
+          if (buffer.isNotEmpty &&
+              buffer.length + para.length > 1500 &&
+              buffer.length > 100) {
+            chunks.add(buffer.trim());
+            buffer = para;
+          } else {
+            buffer = buffer.isEmpty ? para : '$buffer\n\n$para';
+          }
+        }
+        if (buffer.trim().length > 20) chunks.add(buffer.trim());
+      }
+    }
+
+    // 3. Final fallback: split by sentences, grouped into ~1000-char chunks
+    if (chunks.length < 3) {
+      chunks.clear();
+      final sentences = text.split(RegExp(r'(?<=[.!?])\s+'))
+          .where((s) => s.trim().length > 5)
+          .toList();
+      String buffer = '';
+      for (final sent in sentences) {
+        if (buffer.isNotEmpty &&
+            buffer.length + sent.length > 1000 &&
+            buffer.length > 100) {
+          chunks.add(buffer.trim());
+          buffer = sent;
+        } else {
+          buffer = buffer.isEmpty ? sent : '$buffer $sent';
+        }
+      }
+      if (buffer.trim().length > 20) chunks.add(buffer.trim());
+    }
+
+    // 4. If still nothing, store the whole text as one chunk
+    if (chunks.isEmpty && text.trim().length > 20) {
+      chunks.add(text.trim());
+    }
+
+    final entities = chunks.map((t) => DocumentChunk(text: t)).toList();
+    _box.putMany(entities);
+  }
+
   /// Clears all stored chunks.
   void clearAll() => _box.removeAll();
 
   // ───────────────────────────── Read ──────────────────────────────────────
 
-  /// Returns up to [limit] chunks whose text contains any keyword from [query]
-  /// (keyword = word with more than 2 characters, after cleaning punctuation).
+  // Common English stopwords to skip during keyword extraction
+  static const _stopwords = {
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
+    'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
+    'as', 'into', 'through', 'during', 'before', 'after', 'above',
+    'below', 'between', 'out', 'off', 'over', 'under', 'again',
+    'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why',
+    'how', 'all', 'each', 'every', 'both', 'few', 'more', 'most',
+    'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
+    'so', 'than', 'too', 'very', 'just', 'because', 'but', 'and', 'or',
+    'if', 'while', 'about', 'what', 'which', 'who', 'whom', 'this',
+    'that', 'these', 'those', 'am', 'it', 'its', 'he', 'she', 'they',
+    'them', 'his', 'her', 'my', 'your', 'our', 'their', 'me', 'him',
+    'us', 'you', 'i', 'we', 'tell', 'give', 'get', 'got', 'many',
+    'much', 'any', 'also', 'well',
+  };
+
+  /// Returns up to [limit] chunks whose text contains any keyword from [query].
+  /// Uses stopword removal, punctuation cleaning, and weighted scoring.
   List<String> searchContext(String query, {int limit = 5}) {
+    // Extract meaningful keywords: remove punctuation, possessives, stopwords
     final keywords = query
+        .toLowerCase()
+        .replaceAll(RegExp(r"['']"), ' ')   // handle possessives
         .split(RegExp(r'\s+'))
         .map((w) => w.replaceAll(RegExp(r'[^\w]'), ''))
-        .where((w) => w.length > 2)
+        .where((w) => w.length > 1 && !_stopwords.contains(w))
+        .toSet()   // deduplicate
         .toList();
 
-    if (keywords.isEmpty) return [];
+    if (keywords.isEmpty) {
+      // No meaningful keywords — return all chunks (capped)
+      return _box.getAll().take(limit).map((e) => e.text).toList();
+    }
 
     // Build OR condition: text contains keyword1 OR keyword2 OR …
     Condition<DocumentChunk>? condition;
@@ -68,13 +182,25 @@ class ObjectBoxService {
         .build()
         .find();
 
-    // Score results by how many keywords they match
+    // Score results by how many keywords they match + bonus for density
     final scored = results.map((chunk) {
-      int score = 0;
+      double score = 0;
       final lower = chunk.text.toLowerCase();
       for (final kw in keywords) {
-        if (lower.contains(kw.toLowerCase())) score++;
+        if (lower.contains(kw)) {
+          score += 1.0;
+          // Count occurrences using indexOf loop (safe, no regex)
+          int count = 0;
+          int idx = 0;
+          while ((idx = lower.indexOf(kw, idx)) != -1) {
+            count++;
+            idx += kw.length;
+          }
+          score += (count - 1) * 0.3; // bonus for multiple occurrences
+        }
       }
+      // Slight preference for chunks that match a higher percentage of keywords
+      score += (score / keywords.length) * 0.5;
       return MapEntry(score, chunk);
     }).toList()
       ..sort((a, b) => b.key.compareTo(a.key));
@@ -87,6 +213,61 @@ class ObjectBoxService {
 
   /// Total number of stored chunks.
   int get count => _box.count();
+
+  /// Scores ALL chunks against [query] keywords and returns up to [limit]
+  /// best-matching chunks. For small documents where we want to search
+  /// everything without relying on DB-level filtering.
+  List<String> scoredSearchAll(String query, {int limit = 5}) {
+    final all = _box.getAll();
+    if (all.isEmpty) return [];
+
+    final keywords = query
+        .toLowerCase()
+        .replaceAll(RegExp(r"['\u2019]"), ' ')
+        .split(RegExp(r'\s+'))
+        .map((w) => w.replaceAll(RegExp(r'[^\w]'), ''))
+        .where((w) => w.length > 1 && !_stopwords.contains(w))
+        .toSet()
+        .toList();
+
+    if (keywords.isEmpty) {
+      return all.take(limit).map((e) => e.text).toList();
+    }
+
+    final scored = all.map((chunk) {
+      double score = 0;
+      final lower = chunk.text.toLowerCase();
+      for (final kw in keywords) {
+        if (lower.contains(kw)) {
+          score += 1.0;
+          // Bonus for multiple occurrences
+          int count = 0;
+          int idx = 0;
+          while ((idx = lower.indexOf(kw, idx)) != -1) {
+            count++;
+            idx += kw.length;
+          }
+          score += (count - 1) * 0.3;
+        }
+      }
+      score += (score / keywords.length) * 0.5;
+      return MapEntry(score, chunk.text);
+    }).toList()
+      ..sort((a, b) => b.key.compareTo(a.key));
+
+    // Return chunks that matched at least one keyword, up to limit
+    final results = scored
+        .where((e) => e.key > 0)
+        .take(limit)
+        .map((e) => e.value)
+        .toList();
+
+    // If nothing matched, return first few chunks as fallback
+    if (results.isEmpty) {
+      return all.take(limit).map((e) => e.text).toList();
+    }
+    return results;
+  }
 
   /// Returns the first [n] chunk texts for preview purposes.
   List<String> getSampleChunks({int n = 3}) {

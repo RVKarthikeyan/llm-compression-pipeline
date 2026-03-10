@@ -56,6 +56,10 @@ class MainActivity : FlutterActivity() {
     private var isLoaded = false
     @Volatile private var stopRequested = false
 
+    // Store paths for module re-creation between inferences
+    private var storedModelPath: String? = null
+    private var storedTokenizerPath: String? = null
+
     // "llama3" or "gemma" — detected from tokenizer_config.json
     private var chatTemplateType = "llama3"
 
@@ -208,6 +212,10 @@ class MainActivity : FlutterActivity() {
                 val elapsed = System.currentTimeMillis() - t0
                 log("Model loaded in ${elapsed}ms (result=$loadResult)")
 
+                // Store paths for re-creation between inferences
+                storedModelPath = modelPath
+                storedTokenizerPath = tokenizerPath
+
                 isLoaded = true
                 log("=== MODEL READY ===")
                 mainHandler.post { result.success("native_loaded") }
@@ -260,6 +268,34 @@ class MainActivity : FlutterActivity() {
         executor.execute {
             try {
                 stopRequested = false
+
+                // Recreate LlmModule before each inference to fully reset
+                // the KV-cache. resetNative() destroys the module, so we
+                // must create a fresh instance. The OS page cache keeps the
+                // model file in memory, so reload is fast (~1-3s).
+                val mPath = storedModelPath
+                val tPath = storedTokenizerPath
+                if (mPath != null && tPath != null) {
+                    try {
+                        llmModule?.stop()
+                    } catch (_: Exception) {}
+                    try {
+                        llmModule?.resetNative()
+                    } catch (_: Exception) {}
+                    llmModule = null
+
+                    val t0r = System.currentTimeMillis()
+                    llmModule = LlmModule(
+                        LlmModule.MODEL_TYPE_TEXT,
+                        mPath,
+                        tPath,
+                        TEMPERATURE
+                    )
+                    llmModule!!.load()
+                    val reloadMs = System.currentTimeMillis() - t0r
+                    log("Module re-created in ${reloadMs}ms (KV-cache fresh)")
+                }
+
                 log("=== INFERENCE START === prompt: \"${prompt.take(80)}\"")
 
                 val formattedPrompt = formatChatPrompt(prompt, context)

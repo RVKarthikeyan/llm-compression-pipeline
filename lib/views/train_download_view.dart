@@ -1,12 +1,14 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../providers/app_providers.dart';
-import '../services/encryption_service.dart';
+import '../services/backend_service.dart';
 
 class TrainDownloadView extends ConsumerStatefulWidget {
   const TrainDownloadView({super.key});
@@ -17,35 +19,33 @@ class TrainDownloadView extends ConsumerStatefulWidget {
 
 class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
   final _tokenCtrl = TextEditingController();
+  final _wandbCtrl = TextEditingController();
+  final _urlCtrl = TextEditingController();
 
   // ── Local state ─────────────────────────────────────────────────────────
 
-  // Token
-  bool _tokenSaved = false;
-  bool _savingToken = false;
+  // Auth
+  bool _authenticating = false;
+  bool _authenticated = false;
+  String? _username;
 
   // PDF
   String? _pdfFileName;
-  bool _extracting = false;
-  String? _extractedText;
+  File? _pdfFile;
   int _chunkCount = 0;
-  List<String> _sampleChunks = [];
-
-  // Encryption
-  EncryptionTestResult? _encTest;
-  EncryptionService? _encService;
-
-  // Upload
-  bool _uploading = false;
-  bool _uploaded = false;
 
   // Pipeline
-  bool _pipelineRunning = false;
-  bool _pipelineDone = false;
+  bool _triggeringPipeline = false;
+  String? _jobId;
+  bool _polling = false;
+  Timer? _pollTimer;
+  PipelineStatusResponse? _lastStatus;
+
+  // Download
+  bool _downloading = false;
+  double _downloadProgress = 0;
 
   // Model
-  bool _downloading = false;
-  double _dlProgress = 0;
   String? _modelPath;
 
   String? _error;
@@ -53,13 +53,14 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
   @override
   void initState() {
     super.initState();
-    // Pre-populate token if already saved.
+    // Pre-populate tokens if already saved.
     ref.listenManual(settingsProvider, (_, next) {
       if (next is AsyncData<String> && _tokenCtrl.text.isEmpty) {
         _tokenCtrl.text = next.value;
-        if (next.value.isNotEmpty) setState(() => _tokenSaved = true);
       }
     }, fireImmediately: true);
+
+    _loadSavedKeys();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final m = ref.read(modelProvider);
@@ -69,33 +70,72 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
     });
   }
 
+  Future<void> _loadSavedKeys() async {
+    final wandb = await readWandbKey();
+    if (wandb.isNotEmpty && _wandbCtrl.text.isEmpty) {
+      _wandbCtrl.text = wandb;
+    }
+    final url = await readBackendUrl();
+    if (url.isNotEmpty && _urlCtrl.text.isEmpty) {
+      _urlCtrl.text = url;
+    } else if (_urlCtrl.text.isEmpty) {
+      _urlCtrl.text = 'http://10.0.2.2:8000';
+    }
+  }
+
   @override
   void dispose() {
+    _pollTimer?.cancel();
     _tokenCtrl.dispose();
+    _wandbCtrl.dispose();
+    _urlCtrl.dispose();
     super.dispose();
   }
 
   // ── Actions ─────────────────────────────────────────────────────────────
 
-  Future<void> _saveToken() async {
-    final t = _tokenCtrl.text.trim();
-    if (t.isEmpty) return;
+  Future<void> _authenticate() async {
+    final hfToken = _tokenCtrl.text.trim();
+    final wandbKey = _wandbCtrl.text.trim();
+    final backendUrl = _urlCtrl.text.trim();
+
+    if (hfToken.isEmpty || wandbKey.isEmpty) {
+      setState(() => _error = 'Both HF token and W&B API key are required.');
+      return;
+    }
 
     setState(() {
-      _savingToken = true;
+      _authenticating = true;
       _error = null;
     });
+
     try {
-      await ref.read(settingsProvider.notifier).saveToken(t);
-      await ref.read(backendServiceProvider).postHfToken(t);
+      // Save credentials locally
+      await ref.read(settingsProvider.notifier).saveToken(hfToken);
+      await saveWandbKey(wandbKey);
+      if (backendUrl.isNotEmpty) {
+        await saveBackendUrl(backendUrl);
+      }
+
+      final backend = ref.read(backendServiceProvider);
+      if (backendUrl.isNotEmpty) {
+        backend.setBaseUrl(backendUrl);
+      }
+
+      final authResp = await backend.authenticate(
+        hfToken: hfToken,
+        wandbApiKey: wandbKey,
+      );
+
       setState(() {
-        _tokenSaved = true;
-        _savingToken = false;
+        _authenticating = false;
+        _authenticated = true;
+        _username = authResp.username;
       });
     } catch (e) {
       setState(() {
-        _error = '$e';
-        _savingToken = false;
+        _authenticating = false;
+        _error = 'Authentication failed: $e';
       });
     }
   }
@@ -103,143 +143,160 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
   Future<void> _pickPdf() async {
     final res = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['pdf', 'txt'],
+      allowedExtensions: ['pdf'],
     );
     if (res == null) return;
 
     final file = File(res.files.single.path!);
-
     setState(() {
-      _extracting = true;
+      _pdfFile = file;
       _pdfFileName = res.files.single.name;
-      _extractedText = null;
-      _encTest = null;
-      _encService = null;
-      _chunkCount = 0;
-      _sampleChunks = [];
-      _uploaded = false;
-      _pipelineDone = false;
+      _error = null;
+    });
+
+    // Extract text and store chunks in ObjectBox for RAG
+    try {
+      final doc = PdfDocument(inputBytes: file.readAsBytesSync());
+      final text = PdfTextExtractor(doc).extractText();
+      doc.dispose();
+
+      debugPrint('[RAG] Extracted ${text.length} chars from PDF');
+      debugPrint('[RAG] First 500 chars: ${text.substring(0, text.length < 500 ? text.length : 500)}');
+
+      // Use smart chunking that preserves patient sections and logical blocks
+      final obs = ref.read(objectBoxProvider);
+      await obs.replaceChunksFromText(text);
+
+      final storedCount = obs.count;
+      debugPrint('[RAG] Stored $storedCount chunks in ObjectBox');
+
+      setState(() => _chunkCount = storedCount);
+    } catch (e) {
+      debugPrint('[RAG] PDF chunking FAILED: $e');
+    }
+  }
+
+  Future<void> _triggerPipeline() async {
+    if (_pdfFile == null) return;
+    final hfToken = _tokenCtrl.text.trim();
+
+    setState(() {
+      _triggeringPipeline = true;
       _error = null;
     });
 
     try {
-      // 1. Extract text
-      String text;
-      if (res.files.single.extension?.toLowerCase() == 'pdf') {
-        final doc = PdfDocument(inputBytes: file.readAsBytesSync());
-        text = PdfTextExtractor(doc).extractText();
-        doc.dispose();
-      } else {
-        text = await file.readAsString();
+      final backend = ref.read(backendServiceProvider);
+      final resp = await backend.triggerPipeline(
+        hfToken: hfToken,
+        pdfFile: _pdfFile!,
+      );
+
+      setState(() {
+        _triggeringPipeline = false;
+        _jobId = resp.jobId;
+      });
+
+      // Start polling
+      _startPolling();
+    } catch (e) {
+      setState(() {
+        _triggeringPipeline = false;
+        _error = 'Failed to trigger pipeline: $e';
+      });
+    }
+  }
+
+  void _startPolling() {
+    _polling = true;
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      await _pollStatus();
+    });
+    // Also poll immediately
+    _pollStatus();
+  }
+
+  Future<void> _pollStatus() async {
+    final hfToken = _tokenCtrl.text.trim();
+    try {
+      final backend = ref.read(backendServiceProvider);
+      final status = await backend.getStatus(hfToken: hfToken);
+
+      if (!mounted) return;
+      setState(() => _lastStatus = status);
+
+      if (status.isCompleted || status.isFailed) {
+        _pollTimer?.cancel();
+        setState(() => _polling = false);
       }
-
-      // 2. Chunk & store in ObjectBox (vector DB)
-      final chunks = text
-          .split(RegExp(r'(?<=[.!?])\s+'))
-          .where((c) => c.trim().length > 10)
-          .map((c) => c.trim())
-          .toList();
-      await ref.read(objectBoxProvider).replaceChunks(chunks);
-
-      // 3. Encrypt a snippet for the self-test visual
-      final snippet =
-          text.length > 300 ? text.substring(0, 300) : text;
-      final testResult = EncryptionService.selfTest(snippet);
-
-      // Keep a service instance for the full-content upload
-      final svc = EncryptionService();
-
-      setState(() {
-        _extracting = false;
-        _extractedText = text;
-        _chunkCount = ref.read(objectBoxProvider).count;
-        _sampleChunks = chunks.take(3).toList();
-        _encTest = testResult;
-        _encService = svc;
-      });
     } catch (e) {
-      setState(() {
-        _extracting = false;
-        _error = 'Extraction failed: $e';
-      });
+      // Silently continue polling on transient errors
     }
   }
 
-  Future<void> _upload() async {
-    if (_encService == null || _extractedText == null) return;
+  Future<void> _downloadFromHub() async {
+    if (_username == null || _jobId == null) return;
+    final hfToken = _tokenCtrl.text.trim();
 
-    setState(() {
-      _uploading = true;
-      _error = null;
-    });
-    try {
-      final toEncrypt = _extractedText!.length > 50000
-          ? _extractedText!.substring(0, 50000)
-          : _extractedText!;
-      final enc = _encService!.encrypt(toEncrypt);
-
-      await ref.read(backendServiceProvider).uploadEncryptedContent(
-            encryptedBase64: enc,
-            keyBase64: _encService!.keyBase64,
-            ivBase64: _encService!.ivBase64,
-          );
-      setState(() {
-        _uploading = false;
-        _uploaded = true;
-      });
-    } catch (e) {
-      setState(() {
-        _uploading = false;
-        _error = '$e';
-      });
-    }
-  }
-
-  Future<void> _runPipeline() async {
-    setState(() {
-      _pipelineRunning = true;
-      _error = null;
-    });
-    try {
-      await ref.read(backendServiceProvider).triggerPipeline();
-      setState(() {
-        _pipelineRunning = false;
-        _pipelineDone = true;
-      });
-    } catch (e) {
-      setState(() {
-        _pipelineRunning = false;
-        _error = '$e';
-      });
-    }
-  }
-
-  Future<void> _downloadModel() async {
     setState(() {
       _downloading = true;
-      _dlProgress = 0;
+      _downloadProgress = 0;
       _error = null;
     });
+
     try {
-      await ref.read(backendServiceProvider).downloadModel(
-            url: 'dummy',
-            savePath: 'dummy',
-            onProgress: (p) => setState(() => _dlProgress = p),
+      final backend = ref.read(backendServiceProvider);
+      final appDir = await getApplicationDocumentsDirectory();
+      final saveDir = '${appDir.path}${Platform.pathSeparator}models';
+
+      final file = await backend.downloadModelFromHub(
+        hfToken: hfToken,
+        username: _username!,
+        jobId: _jobId!,
+        saveDir: saveDir,
+        onProgress: (p) {
+          if (mounted) setState(() => _downloadProgress = p);
+        },
+      );
+
+      if (!mounted) return;
+
+      // Auto-detect tokenizer files next to the downloaded .pte
+      final dir = file.parent;
+      String? vocabPath;
+      String? configPath;
+      try {
+        final files = dir.listSync().whereType<File>();
+        for (final f in files) {
+          final name =
+              f.path.split(Platform.pathSeparator).last.toLowerCase();
+          if (name == 'tokenizer.json' ||
+              name.endsWith('_vocab.json') ||
+              name == 'vocab.json') {
+            vocabPath = f.path;
+          }
+          if (name.endsWith('_tokenizer_config.json') ||
+              name == 'tokenizer_config.json') {
+            configPath = f.path;
+          }
+        }
+      } catch (_) {}
+
+      ref.read(modelProvider.notifier).loadModel(
+            file.path,
+            vocabPath: vocabPath,
+            configPath: configPath,
           );
-      setState(() => _downloading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Pipeline download simulated. Use "Load Local .pte" to load a real model.',
-            ),
-          ),
-        );
-      }
+
+      setState(() {
+        _downloading = false;
+        _modelPath = file.path;
+      });
     } catch (e) {
       setState(() {
         _downloading = false;
-        _error = '$e';
+        _error = 'Download failed: $e';
       });
     }
   }
@@ -279,7 +336,6 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
       }
     } catch (_) {}
 
-    // Load Model + tokenizer via native ExecuTorch channel
     ref.read(modelProvider.notifier).loadModel(
           path,
           vocabPath: vocabPath,
@@ -304,19 +360,35 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          // ── 1. Token ────────────────────────────────────────────────────
+          // ── 1. Authentication ───────────────────────────────────────────
           _SectionCard(
             step: 1,
-            title: 'Hugging Face Token',
-            subtitle: 'Required to access models & backend',
+            title: 'Authenticate',
+            subtitle: 'HuggingFace token, W&B key & backend URL',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                TextField(
+                  controller: _urlCtrl,
+                  decoration: InputDecoration(
+                    hintText: 'http://10.0.2.2:8000',
+                    labelText: 'Backend URL',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    prefixIcon: const Icon(Icons.dns_outlined, size: 20),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 12),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 TextField(
                   controller: _tokenCtrl,
                   obscureText: true,
                   decoration: InputDecoration(
                     hintText: 'hf_xxxxxxxxxxxxxxxxxx',
+                    labelText: 'HuggingFace Token',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
                     ),
@@ -327,48 +399,109 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                _savingToken
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : FilledButton.icon(
-                        onPressed: _saveToken,
-                        icon: Icon(
-                            _tokenSaved ? Icons.check : Icons.save,
-                            size: 18),
-                        label: Text(_tokenSaved
-                            ? 'Saved'
-                            : 'Save & Send to Backend'),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: _tokenSaved
-                              ? const Color(0xFF43A047)
-                              : null,
-                        ),
-                      ),
+                TextField(
+                  controller: _wandbCtrl,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    hintText: 'W&B API key',
+                    labelText: 'Weights & Biases API Key',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    prefixIcon:
+                        const Icon(Icons.analytics_outlined, size: 20),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 12),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                if (_authenticating)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else if (_authenticated)
+                  Row(children: [
+                    const Icon(Icons.check_circle,
+                        color: Color(0xFF43A047), size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Authenticated as $_username',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w500, fontSize: 13),
+                    ),
+                  ])
+                else
+                  FilledButton.icon(
+                    onPressed: _authenticate,
+                    icon: const Icon(Icons.login, size: 18),
+                    label: const Text('Authenticate'),
+                  ),
               ],
             ),
           ),
 
           const SizedBox(height: 16),
 
-          // ── 2. Knowledge Document ───────────────────────────────────────
+          // ── 2. Select PDF ───────────────────────────────────────────────
           _SectionCard(
             step: 2,
-            title: 'Upload Knowledge',
-            subtitle: 'Select a PDF/TXT for knowledge distillation',
+            title: 'Select Document',
+            subtitle: 'PDF for knowledge distillation',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 FilledButton.icon(
-                  onPressed: _extracting ? null : _pickPdf,
+                  onPressed: _pickPdf,
                   icon: const Icon(Icons.upload_file, size: 18),
-                  label: Text(_pdfFileName ?? 'Pick PDF / TXT'),
+                  label: Text(_pdfFileName ?? 'Pick PDF'),
                 ),
+                if (_pdfFileName != null) ...[
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    const Icon(Icons.description,
+                        size: 16, color: Color(0xFF4F56C7)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _pdfFileName!,
+                        style: const TextStyle(fontSize: 12),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ]),
+                  if (_chunkCount > 0) ...[
+                    const SizedBox(height: 6),
+                    Row(children: [
+                      const Icon(Icons.storage,
+                          size: 14, color: Color(0xFF43A047)),
+                      const SizedBox(width: 6),
+                      Text(
+                        '$_chunkCount chunks stored for RAG',
+                        style: const TextStyle(
+                            fontSize: 11, color: Color(0xFF43A047)),
+                      ),
+                    ]),
+                  ],
+                ],
+              ],
+            ),
+          ),
 
-                if (_extracting) ...[
-                  const SizedBox(height: 16),
+          const SizedBox(height: 16),
+
+          // ── 3. Trigger Pipeline ─────────────────────────────────────────
+          _SectionCard(
+            step: 3,
+            title: 'Run Pipeline',
+            subtitle:
+                'Pruning → Knowledge Distillation → Quantization → Upload',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (_triggeringPipeline) ...[
                   const Row(children: [
                     SizedBox(
                         width: 16,
@@ -376,100 +509,56 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                         child:
                             CircularProgressIndicator(strokeWidth: 2)),
                     SizedBox(width: 10),
-                    Text('Extracting & processing…'),
+                    Text('Submitting pipeline job…'),
                   ]),
-                ],
+                ] else if (_jobId != null) ...[
+                  Row(children: [
+                    const Icon(Icons.check_circle,
+                        color: Color(0xFF43A047), size: 16),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Job: ${_jobId!.substring(0, 8)}…',
+                        style: const TextStyle(
+                            fontSize: 12, fontFamily: 'monospace'),
+                      ),
+                    ),
+                  ]),
 
-                // ── Extraction results ─────────────────────────────────
-                if (_extractedText != null) ...[
-                  const SizedBox(height: 16),
-                  _InfoChip(
-                      '${_extractedText!.length} characters extracted'),
-                  const SizedBox(height: 6),
-                  _InfoChip(
-                      '$_chunkCount chunks stored in Vector DB'),
-
-                  // Sample chunks
-                  if (_sampleChunks.isNotEmpty) ...[
+                  // ── Status display ────────────────────────────────────
+                  if (_lastStatus != null) ...[
                     const SizedBox(height: 12),
-                    Text('Sample chunks:',
-                        style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.grey.shade700)),
-                    const SizedBox(height: 6),
-                    ..._sampleChunks.map((c) => Container(
-                          margin: const EdgeInsets.only(bottom: 4),
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF5F5F5),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            c.length > 120
-                                ? '${c.substring(0, 120)}…'
-                                : c,
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                        )),
+                    _PipelineProgressCard(status: _lastStatus!),
                   ],
 
-                  // ── Encryption test ──────────────────────────────────
-                  if (_encTest != null) ...[
-                    const SizedBox(height: 16),
-                    _EncryptionTestCard(result: _encTest!),
-                  ],
-
-                  // ── Upload button ────────────────────────────────────
-                  const SizedBox(height: 16),
-                  if (_uploading)
+                  if (_polling) ...[
+                    const SizedBox(height: 8),
                     const Row(children: [
                       SizedBox(
-                          width: 16,
-                          height: 16,
+                          width: 14,
+                          height: 14,
                           child: CircularProgressIndicator(
                               strokeWidth: 2)),
-                      SizedBox(width: 10),
-                      Text('Uploading encrypted data…'),
-                    ])
-                  else if (_uploaded)
-                    const _InfoChip(
-                        '✓ Encrypted content uploaded to backend',
-                        color: Color(0xFF43A047))
-                  else
-                    FilledButton.icon(
-                      onPressed: _upload,
-                      icon: const Icon(Icons.cloud_upload_outlined,
-                          size: 18),
-                      label:
-                          const Text('Upload Encrypted to Backend'),
-                    ),
-                ],
-              ],
-            ),
-          ),
+                      SizedBox(width: 8),
+                      Text('Polling for updates…',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.grey)),
+                    ]),
+                  ],
 
-          const SizedBox(height: 16),
-
-          // ── 3. Pipeline ─────────────────────────────────────────────────
-          _SectionCard(
-            step: 3,
-            title: 'Run Pipeline',
-            subtitle: 'Knowledge distillation & quantization',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (_pipelineRunning) ...[
-                  const LinearProgressIndicator(),
+                  // Manual refresh button
                   const SizedBox(height: 8),
-                  const Text('Running pipeline… this may take minutes.'),
-                ] else if (_pipelineDone)
-                  const _InfoChip(
-                      '✓ Pipeline complete — model ready',
-                      color: Color(0xFF43A047))
-                else
+                  OutlinedButton.icon(
+                    onPressed: _pollStatus,
+                    icon: const Icon(Icons.refresh, size: 16),
+                    label: const Text('Refresh Status'),
+                  ),
+                ] else
                   FilledButton.icon(
-                    onPressed: _uploaded ? _runPipeline : null,
+                    onPressed:
+                        (_authenticated && _pdfFile != null)
+                            ? _triggerPipeline
+                            : null,
                     icon: const Icon(Icons.play_arrow, size: 18),
                     label: const Text('Start Pipeline'),
                   ),
@@ -479,24 +568,32 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
 
           const SizedBox(height: 16),
 
-          // ── 4. Model ────────────────────────────────────────────────────
+          // ── 4. Download & Load Model ────────────────────────────────────
           _SectionCard(
             step: 4,
             title: 'Download & Load Model',
-            subtitle: 'Get your .pte model onto the device',
+            subtitle: 'Download .pte from HuggingFace or load a local file',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Download from HuggingFace
                 if (_downloading) ...[
-                  LinearProgressIndicator(value: _dlProgress),
+                  LinearProgressIndicator(value: _downloadProgress),
                   const SizedBox(height: 8),
-                  Text('${(_dlProgress * 100).toStringAsFixed(0)}%'),
+                  Text(
+                    '${(_downloadProgress * 100).toStringAsFixed(1)}% downloaded',
+                    style: const TextStyle(fontSize: 12),
+                  ),
                 ] else ...[
                   FilledButton.icon(
-                    onPressed:
-                        _pipelineDone ? _downloadModel : null,
+                    onPressed: (_lastStatus != null &&
+                            _lastStatus!.isCompleted &&
+                            _username != null &&
+                            _jobId != null)
+                        ? _downloadFromHub
+                        : null,
                     icon: const Icon(Icons.download, size: 18),
-                    label: const Text('Download from Pipeline'),
+                    label: const Text('Download from HuggingFace'),
                   ),
                   const SizedBox(height: 8),
                   Row(children: [
@@ -538,8 +635,7 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                               .split(Platform.pathSeparator)
                               .last,
                           style: const TextStyle(
-                              fontWeight: FontWeight.w500,
-                              fontSize: 13),
+                              fontWeight: FontWeight.w500, fontSize: 13),
                         ),
                       ),
                     ]),
@@ -570,6 +666,108 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
           ],
 
           const SizedBox(height: 32),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pipeline progress card — shows the current step with visual indicator
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PipelineProgressCard extends StatelessWidget {
+  final PipelineStatusResponse status;
+  const _PipelineProgressCard({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final steps = ['queued', 'pruning', 'distilling', 'quantizing', 'uploading', 'completed'];
+    final currentIdx = steps.indexOf(status.status);
+
+    Color statusColor;
+    IconData statusIcon;
+    if (status.isCompleted) {
+      statusColor = const Color(0xFF43A047);
+      statusIcon = Icons.check_circle;
+    } else if (status.isFailed) {
+      statusColor = Colors.red;
+      statusIcon = Icons.error;
+    } else {
+      statusColor = const Color(0xFF4F56C7);
+      statusIcon = Icons.hourglass_top;
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: status.isFailed
+            ? const Color(0xFFFFEBEE)
+            : status.isCompleted
+                ? const Color(0xFFE8F5E9)
+                : const Color(0xFFEEF0FF),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: statusColor.withValues(alpha: 0.3),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(statusIcon, size: 20, color: statusColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                status.status.toUpperCase(),
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                  color: statusColor,
+                ),
+              ),
+            ),
+            if (status.pteReady == true)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF43A047),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Text(
+                  'PTE READY',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+            status.message,
+            style: const TextStyle(fontSize: 12),
+          ),
+          if (status.isRunning && currentIdx >= 0) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: (currentIdx + 1) / steps.length,
+                minHeight: 6,
+                backgroundColor: Colors.grey.shade200,
+                valueColor:
+                    AlwaysStoppedAnimation<Color>(statusColor),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Step ${currentIdx + 1} of ${steps.length}',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ],
         ],
       ),
     );
@@ -645,138 +843,6 @@ class _SectionCard extends StatelessWidget {
             child,
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _InfoChip extends StatelessWidget {
-  final String text;
-  final Color? color;
-  const _InfoChip(this.text, {this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(children: [
-      Icon(Icons.check_circle,
-          size: 15, color: color ?? const Color(0xFF4F56C7)),
-      const SizedBox(width: 6),
-      Expanded(
-        child: Text(text,
-            style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: color ?? Colors.grey.shade700)),
-      ),
-    ]);
-  }
-}
-
-class _EncryptionTestCard extends StatelessWidget {
-  final EncryptionTestResult result;
-  const _EncryptionTestCard({required this.result});
-
-  String _trunc(String s, int max) =>
-      s.length > max ? '${s.substring(0, max)}…' : s;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color:
-            result.passed ? const Color(0xFFE8F5E9) : const Color(0xFFFFEBEE),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: result.passed
-              ? const Color(0xFF81C784)
-              : const Color(0xFFEF9A9A),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Icon(
-              result.passed ? Icons.lock_outlined : Icons.lock_open,
-              size: 18,
-              color: result.passed
-                  ? const Color(0xFF43A047)
-                  : Colors.red,
-            ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                'AES-256-CBC Encryption Test',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                  color: result.passed
-                      ? const Color(0xFF2E7D32)
-                      : Colors.red.shade700,
-                ),
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: result.passed
-                    ? const Color(0xFF43A047)
-                    : Colors.red,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                result.passed ? 'PASS' : 'FAIL',
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600),
-              ),
-            ),
-          ]),
-          const SizedBox(height: 10),
-          _EncRow('Original', _trunc(result.original, 80)),
-          _EncRow('Encrypted', _trunc(result.encrypted, 80)),
-          _EncRow('Decrypted', _trunc(result.decrypted, 80)),
-          const Divider(height: 16),
-          _EncRow('Key', _trunc(result.keyBase64, 44)),
-          _EncRow('IV', _trunc(result.ivBase64, 24)),
-        ],
-      ),
-    );
-  }
-}
-
-class _EncRow extends StatelessWidget {
-  final String label;
-  final String value;
-  const _EncRow(this.label, this.value);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 70,
-            child: Text(
-              label,
-              style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.grey.shade700),
-            ),
-          ),
-          Expanded(
-            child: Text(value,
-                style: const TextStyle(
-                    fontSize: 11, fontFamily: 'monospace')),
-          ),
-        ],
       ),
     );
   }

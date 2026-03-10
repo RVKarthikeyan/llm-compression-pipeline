@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'providers/app_providers.dart';
 import 'services/objectbox_service.dart';
-import 'views/home_view.dart';
+import 'views/splash_view.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,7 +27,7 @@ class LocalAiApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Local AI',
+      title: 'Elrond',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorSchemeSeed: const Color(0xFF4F56C7),
@@ -35,7 +35,7 @@ class LocalAiApp extends StatelessWidget {
         brightness: Brightness.light,
         scaffoldBackgroundColor: Colors.white,
       ),
-      home: const HomeView(),
+      home: const SplashView(),
     );
   }
 }

@@ -13,6 +13,8 @@ class SettingsView extends ConsumerStatefulWidget {
 class _SettingsViewState extends ConsumerState<SettingsView> {
   final _formKey = GlobalKey<FormState>();
   final _tokenController = TextEditingController();
+  final _wandbController = TextEditingController();
+  final _urlController = TextEditingController();
   bool _saved = false;
 
   @override
@@ -24,11 +26,25 @@ class _SettingsViewState extends ConsumerState<SettingsView> {
         _tokenController.text = next.value;
       }
     }, fireImmediately: true);
+    _loadKeys();
+  }
+
+  Future<void> _loadKeys() async {
+    final wandb = await readWandbKey();
+    if (wandb.isNotEmpty && _wandbController.text.isEmpty) {
+      _wandbController.text = wandb;
+    }
+    final url = await readBackendUrl();
+    if (url.isNotEmpty && _urlController.text.isEmpty) {
+      _urlController.text = url;
+    }
   }
 
   @override
   void dispose() {
     _tokenController.dispose();
+    _wandbController.dispose();
+    _urlController.dispose();
     super.dispose();
   }
 
@@ -37,6 +53,12 @@ class _SettingsViewState extends ConsumerState<SettingsView> {
     await ref
         .read(settingsProvider.notifier)
         .saveToken(_tokenController.text.trim());
+    await saveWandbKey(_wandbController.text.trim());
+    final url = _urlController.text.trim();
+    if (url.isNotEmpty) {
+      await saveBackendUrl(url);
+      ref.read(backendServiceProvider).setBaseUrl(url);
+    }
     setState(() => _saved = true);
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _saved = false);
@@ -87,6 +109,35 @@ class _SettingsViewState extends ConsumerState<SettingsView> {
                           (v == null || v.trim().isEmpty)
                               ? 'Token is required'
                               : null,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Weights & Biases API Key',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _wandbController,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        hintText: 'W&B API key',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.analytics_outlined),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Backend URL',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _urlController,
+                      decoration: const InputDecoration(
+                        hintText: 'http://10.0.2.2:8000',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.dns_outlined),
+                      ),
                     ),
                   ],
                 ),

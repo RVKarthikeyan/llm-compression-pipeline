@@ -55,9 +55,8 @@ class PipelineView extends ConsumerWidget {
       content = await file.readAsString();
     }
 
-    // 2. Chunk & store in ObjectBox
-    final chunks = content.split(RegExp(r'(?<=[.!?])\s+'));
-    await ref.read(objectBoxProvider).replaceChunks(chunks);
+    // 2. Chunk & store in ObjectBox using smart chunking
+    await ref.read(objectBoxProvider).replaceChunksFromText(content);
 
     // Update pipeline state: mark PDF selected
     ref.read(pipelineProvider.notifier).setPdfSelected(filePath);

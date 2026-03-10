@@ -26,6 +26,8 @@ final backendServiceProvider =
 
 const _storage = FlutterSecureStorage();
 const _hfTokenKey = 'hf_access_token';
+const _wandbKeyKey = 'wandb_api_key';
+const _backendUrlKey = 'backend_url';
 
 class SettingsNotifier extends AsyncNotifier<String> {
   @override
@@ -40,6 +42,28 @@ class SettingsNotifier extends AsyncNotifier<String> {
 
 final settingsProvider =
     AsyncNotifierProvider<SettingsNotifier, String>(SettingsNotifier.new);
+
+/// Stores the W&B API key in secure storage.
+final wandbKeyProvider = FutureProvider<String>((ref) async {
+  return await _storage.read(key: _wandbKeyKey) ?? '';
+});
+
+Future<void> saveWandbKey(String key) async {
+  await _storage.write(key: _wandbKeyKey, value: key);
+}
+
+Future<String> readWandbKey() async {
+  return await _storage.read(key: _wandbKeyKey) ?? '';
+}
+
+/// Stores the backend URL in secure storage.
+Future<void> saveBackendUrl(String url) async {
+  await _storage.write(key: _backendUrlKey, value: url);
+}
+
+Future<String> readBackendUrl() async {
+  return await _storage.read(key: _backendUrlKey) ?? '';
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Model state (loading / loaded / error)
@@ -245,26 +269,36 @@ class ChatNotifier extends Notifier<ChatState> {
     // RAG: retrieve context from ObjectBox
     final obs = ref.read(objectBoxProvider);
     final totalChunks = obs.count;
+    debugPrint('[RAG] ObjectBox has $totalChunks chunks');
 
-    // For small documents (≤30 chunks), send the ENTIRE document
-    // so the model never misses critical sections like diagnoses.
-    // For larger docs, fall back to keyword search.
+    // Always score chunks by relevance to the query.
+    // For small docs (≤30 chunks), score ALL chunks so we don't miss anything.
+    // For larger docs, use DB-level keyword search first.
     List<String> contextChunks;
     if (totalChunks > 0 && totalChunks <= 30) {
-      contextChunks = obs.getAllChunks();
+      contextChunks = obs.scoredSearchAll(userText);
+      debugPrint('[RAG] Scored ALL chunks → ${contextChunks.length} selected');
     } else {
       contextChunks = obs.searchContext(userText);
+      debugPrint('[RAG] Keyword search returned ${contextChunks.length} chunks');
     }
     final hasContext = contextChunks.isNotEmpty;
 
-    // Send full context chunks (no truncation — small DB, model needs all info)
+    // Build context string, capped at 1500 chars to fit within
+    // model's actual max_context_len (~940 tokens) with prompt overhead.
     String? ctx;
     if (hasContext) {
-      ctx = contextChunks.join('\n\n');
-      // Cap total context to ~3000 chars to fit in SEQ_LEN with prompt overhead
-      if (ctx.length > 3000) {
-        ctx = ctx.substring(0, 3000);
+      final buf = StringBuffer();
+      for (final chunk in contextChunks) {
+        if (buf.length + chunk.length + 2 > 1500 && buf.isNotEmpty) break;
+        if (buf.isNotEmpty) buf.write('\n\n');
+        buf.write(chunk);
       }
+      ctx = buf.toString();
+      debugPrint('[RAG] Context: ${ctx.length} chars from ${contextChunks.length} chunks');
+      debugPrint('[RAG] Context preview: ${ctx.substring(0, ctx.length < 300 ? ctx.length : 300)}');
+    } else {
+      debugPrint('[RAG] NO context found!');
     }
 
     String aiResponse;
