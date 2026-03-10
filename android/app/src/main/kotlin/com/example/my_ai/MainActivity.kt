@@ -29,9 +29,9 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "ExecuTorch"
         private const val CHANNEL = "com.example.my_ai/executorch"
-        private const val MAX_NEW_TOKENS = 150
-        private const val SEQ_LEN = 2048
-        private const val TEMPERATURE = 0.0f
+        private const val MAX_NEW_TOKENS = 300
+        private const val SEQ_LEN = 4096
+        private const val TEMPERATURE = 0.7f
 
         /** EOS markers — if any of these appear as a token, stop generation. */
         private val EOS_TOKENS = listOf(

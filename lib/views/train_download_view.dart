@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path_provider/path_provider.dart';
+
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../providers/app_providers.dart';
@@ -169,7 +169,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
         doc.dispose();
 
         debugPrint('[RAG] Extracted ${text.length} chars from PDF');
-        debugPrint('[RAG] First 500 chars: ${text.substring(0, text.length < 500 ? text.length : 500)}');
+        debugPrint(
+          '[RAG] First 500 chars: ${text.substring(0, text.length < 500 ? text.length : 500)}',
+        );
 
         // Use smart chunking that preserves patient sections and logical blocks
         final obs = ref.read(objectBoxProvider);
@@ -250,6 +252,12 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
     if (_username == null || _jobId == null) return;
     final hfToken = _tokenCtrl.text.trim();
 
+    // Ask user to pick a save directory
+    final selectedDir = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Choose where to save the model',
+    );
+    if (selectedDir == null) return; // User cancelled
+
     setState(() {
       _downloading = true;
       _downloadProgress = 0;
@@ -258,8 +266,7 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
 
     try {
       final backend = ref.read(backendServiceProvider);
-      final appDir = await getApplicationDocumentsDirectory();
-      final saveDir = '${appDir.path}${Platform.pathSeparator}models';
+      final saveDir = selectedDir;
 
       final file = await backend.downloadModelFromHub(
         hfToken: hfToken,
@@ -280,8 +287,7 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
       try {
         final files = dir.listSync().whereType<File>();
         for (final f in files) {
-          final name =
-              f.path.split(Platform.pathSeparator).last.toLowerCase();
+          final name = f.path.split(Platform.pathSeparator).last.toLowerCase();
           if (name == 'tokenizer.json' ||
               name.endsWith('_vocab.json') ||
               name == 'vocab.json') {
@@ -294,11 +300,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
         }
       } catch (_) {}
 
-      ref.read(modelProvider.notifier).loadModel(
-            file.path,
-            vocabPath: vocabPath,
-            configPath: configPath,
-          );
+      ref
+          .read(modelProvider.notifier)
+          .loadModel(file.path, vocabPath: vocabPath, configPath: configPath);
 
       setState(() {
         _downloading = false;
@@ -347,11 +351,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
       }
     } catch (_) {}
 
-    ref.read(modelProvider.notifier).loadModel(
-          path,
-          vocabPath: vocabPath,
-          configPath: configPath,
-        );
+    ref
+        .read(modelProvider.notifier)
+        .loadModel(path, vocabPath: vocabPath, configPath: configPath);
     setState(() => _modelPath = path);
   }
 
@@ -390,7 +392,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                     prefixIcon: const Icon(Icons.dns_outlined, size: 20),
                     isDense: true,
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 12),
+                      horizontal: 12,
+                      vertical: 12,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -406,7 +410,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                     prefixIcon: const Icon(Icons.key_outlined, size: 20),
                     isDense: true,
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 12),
+                      horizontal: 12,
+                      vertical: 12,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -419,11 +425,12 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    prefixIcon:
-                        const Icon(Icons.analytics_outlined, size: 20),
+                    prefixIcon: const Icon(Icons.analytics_outlined, size: 20),
                     isDense: true,
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 12),
+                      horizontal: 12,
+                      vertical: 12,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -434,16 +441,23 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 else if (_authenticated)
-                  Row(children: [
-                    const Icon(Icons.check_circle,
-                        color: Color(0xFF43A047), size: 18),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Authenticated as $_username',
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w500, fontSize: 13),
-                    ),
-                  ])
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.check_circle,
+                        color: Color(0xFF43A047),
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Authenticated as $_username',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w500,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  )
                 else
                   FilledButton.icon(
                     onPressed: _authenticate,
@@ -468,38 +482,53 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                   onPressed: _pickingPdf ? null : _pickPdf,
                   icon: _pickingPdf
                       ? const SizedBox(
-                          width: 18, height: 18,
+                          width: 18,
+                          height: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.upload_file, size: 18),
-                  label: Text(_pickingPdf ? 'Processing…' : (_pdfFileName ?? 'Pick PDF')),
+                  label: Text(
+                    _pickingPdf ? 'Processing…' : (_pdfFileName ?? 'Pick PDF'),
+                  ),
                 ),
                 if (_pdfFileName != null) ...[
                   const SizedBox(height: 8),
-                  Row(children: [
-                    const Icon(Icons.description,
-                        size: 16, color: Color(0xFF4F56C7)),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        _pdfFileName!,
-                        style: const TextStyle(fontSize: 12),
-                        overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.description,
+                        size: 16,
+                        color: Color(0xFF4F56C7),
                       ),
-                    ),
-                  ]),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _pdfFileName!,
+                          style: const TextStyle(fontSize: 12),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
                   if (_chunkCount > 0) ...[
                     const SizedBox(height: 6),
-                    Row(children: [
-                      const Icon(Icons.storage,
-                          size: 14, color: Color(0xFF43A047)),
-                      const SizedBox(width: 6),
-                      Text(
-                        '$_chunkCount chunks stored for RAG',
-                        style: const TextStyle(
-                            fontSize: 11, color: Color(0xFF43A047)),
-                      ),
-                    ]),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.storage,
+                          size: 14,
+                          color: Color(0xFF43A047),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '$_chunkCount chunks stored for RAG',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF43A047),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ],
               ],
@@ -518,28 +547,37 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (_triggeringPipeline) ...[
-                  const Row(children: [
-                    SizedBox(
+                  const Row(
+                    children: [
+                      SizedBox(
                         width: 16,
                         height: 16,
-                        child:
-                            CircularProgressIndicator(strokeWidth: 2)),
-                    SizedBox(width: 10),
-                    Text('Submitting pipeline job…'),
-                  ]),
-                ] else if (_jobId != null) ...[
-                  Row(children: [
-                    const Icon(Icons.check_circle,
-                        color: Color(0xFF43A047), size: 16),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Job: ${_jobId!.substring(0, 8)}…',
-                        style: const TextStyle(
-                            fontSize: 12, fontFamily: 'monospace'),
+                        child: CircularProgressIndicator(strokeWidth: 2),
                       ),
-                    ),
-                  ]),
+                      SizedBox(width: 10),
+                      Text('Submitting pipeline job…'),
+                    ],
+                  ),
+                ] else if (_jobId != null) ...[
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.check_circle,
+                        color: Color(0xFF43A047),
+                        size: 16,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Job: ${_jobId!.substring(0, 8)}…',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
 
                   // ── Status display ────────────────────────────────────
                   if (_lastStatus != null) ...[
@@ -549,17 +587,20 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
 
                   if (_polling) ...[
                     const SizedBox(height: 8),
-                    const Row(children: [
-                      SizedBox(
+                    const Row(
+                      children: [
+                        SizedBox(
                           width: 14,
                           height: 14,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2)),
-                      SizedBox(width: 8),
-                      Text('Polling for updates…',
-                          style: TextStyle(
-                              fontSize: 12, color: Colors.grey)),
-                    ]),
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Polling for updates…',
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      ],
+                    ),
                   ],
 
                   // Manual refresh button
@@ -571,10 +612,9 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                   ),
                 ] else
                   FilledButton.icon(
-                    onPressed:
-                        (_authenticated && _pdfFile != null)
-                            ? _triggerPipeline
-                            : null,
+                    onPressed: (_authenticated && _pdfFile != null)
+                        ? _triggerPipeline
+                        : null,
                     icon: const Icon(Icons.play_arrow, size: 18),
                     label: const Text('Start Pipeline'),
                   ),
@@ -602,7 +642,8 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                   ),
                 ] else ...[
                   FilledButton.icon(
-                    onPressed: (_lastStatus != null &&
+                    onPressed:
+                        (_lastStatus != null &&
                             _lastStatus!.isCompleted &&
                             _username != null &&
                             _jobId != null)
@@ -612,20 +653,22 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                     label: const Text('Download from HuggingFace'),
                   ),
                   const SizedBox(height: 8),
-                  Row(children: [
-                    Expanded(
-                        child: Divider(color: Colors.grey.shade300)),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12),
-                      child: Text('or',
+                  Row(
+                    children: [
+                      Expanded(child: Divider(color: Colors.grey.shade300)),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          'or',
                           style: TextStyle(
-                              color: Colors.grey.shade500,
-                              fontSize: 12)),
-                    ),
-                    Expanded(
-                        child: Divider(color: Colors.grey.shade300)),
-                  ]),
+                            color: Colors.grey.shade500,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      Expanded(child: Divider(color: Colors.grey.shade300)),
+                    ],
+                  ),
                   const SizedBox(height: 8),
                   OutlinedButton.icon(
                     onPressed: _loadLocal,
@@ -641,20 +684,25 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                       color: const Color(0xFFE8F5E9),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Row(children: [
-                      const Icon(Icons.check_circle,
-                          color: Color(0xFF43A047), size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _modelPath!
-                              .split(Platform.pathSeparator)
-                              .last,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w500, fontSize: 13),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.check_circle,
+                          color: Color(0xFF43A047),
+                          size: 18,
                         ),
-                      ),
-                    ]),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _modelPath!.split(Platform.pathSeparator).last,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w500,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ],
@@ -670,14 +718,15 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                 color: const Color(0xFFFFEBEE),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Row(children: [
-                const Icon(Icons.error_outline,
-                    color: Colors.red, size: 18),
-                const SizedBox(width: 8),
-                Expanded(
-                    child: Text(_error!,
-                        style: const TextStyle(fontSize: 13))),
-              ]),
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline, color: Colors.red, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(_error!, style: const TextStyle(fontSize: 13)),
+                  ),
+                ],
+              ),
             ),
           ],
 
@@ -698,7 +747,14 @@ class _PipelineProgressCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final steps = ['queued', 'pruning', 'distilling', 'quantizing', 'uploading', 'completed'];
+    final steps = [
+      'queued',
+      'pruning',
+      'distilling',
+      'quantizing',
+      'uploading',
+      'completed',
+    ];
     final currentIdx = steps.indexOf(status.status);
 
     Color statusColor;
@@ -721,51 +777,51 @@ class _PipelineProgressCard extends StatelessWidget {
         color: status.isFailed
             ? const Color(0xFFFFEBEE)
             : status.isCompleted
-                ? const Color(0xFFE8F5E9)
-                : const Color(0xFFEEF0FF),
+            ? const Color(0xFFE8F5E9)
+            : const Color(0xFFEEF0FF),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: statusColor.withValues(alpha: 0.3),
-        ),
+        border: Border.all(color: statusColor.withValues(alpha: 0.3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Icon(statusIcon, size: 20, color: statusColor),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                status.status.toUpperCase(),
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                  color: statusColor,
+          Row(
+            children: [
+              Icon(statusIcon, size: 20, color: statusColor),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  status.status.toUpperCase(),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    color: statusColor,
+                  ),
                 ),
               ),
-            ),
-            if (status.pteReady == true)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF43A047),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Text(
-                  'PTE READY',
-                  style: TextStyle(
+              if (status.pteReady == true)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF43A047),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Text(
+                    'PTE READY',
+                    style: TextStyle(
                       color: Colors.white,
                       fontSize: 10,
-                      fontWeight: FontWeight.w600),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
-              ),
-          ]),
-          const SizedBox(height: 8),
-          Text(
-            status.message,
-            style: const TextStyle(fontSize: 12),
+            ],
           ),
+          const SizedBox(height: 8),
+          Text(status.message, style: const TextStyle(fontSize: 12)),
           if (status.isRunning && currentIdx >= 0) ...[
             const SizedBox(height: 10),
             ClipRRect(
@@ -774,8 +830,7 @@ class _PipelineProgressCard extends StatelessWidget {
                 value: (currentIdx + 1) / steps.length,
                 minHeight: 6,
                 backgroundColor: Colors.grey.shade200,
-                valueColor:
-                    AlwaysStoppedAnimation<Color>(statusColor),
+                valueColor: AlwaysStoppedAnimation<Color>(statusColor),
               ),
             ),
             const SizedBox(height: 4),
@@ -821,40 +876,49 @@ class _SectionCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Container(
-                width: 28,
-                height: 28,
-                decoration: const BoxDecoration(
-                  color: Color(0xFFEEF0FF),
-                  shape: BoxShape.circle,
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  '$step',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                    color: Color(0xFF4F56C7),
+            Row(
+              children: [
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFEEF0FF),
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '$step',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                      color: Color(0xFF4F56C7),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
                         style: const TextStyle(
-                            fontWeight: FontWeight.w600, fontSize: 15)),
-                    Text(subtitle,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 15,
+                        ),
+                      ),
+                      Text(
+                        subtitle,
                         style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey.shade500)),
-                  ],
+                          fontSize: 12,
+                          color: Colors.grey.shade500,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ]),
+              ],
+            ),
             const SizedBox(height: 14),
             child,
           ],
