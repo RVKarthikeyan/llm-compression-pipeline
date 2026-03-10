@@ -395,10 +395,10 @@ class MainActivity : FlutterActivity() {
         // System message
         sb.append("<|start_header_id|>system<|end_header_id|>\n\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a helpful document assistant. Be concise — answer in a few sentences unless the user asks for detail. ")
-            sb.append("Answer the user's question using the document first. ")
-            sb.append("If the document contains the answer, state it directly. ")
-            sb.append("If the document does not fully answer the question, say so, then briefly add anything you know that might help.")
+            sb.append("You are a precise document assistant. Answer the user's question using ONLY the provided document text. ")
+            sb.append("Quote or reference specific parts of the document to support your answer. ")
+            sb.append("If the document does not contain enough information to answer, clearly state that. ")
+            sb.append("Be concise unless the user asks for detail.")
         } else {
             sb.append("You are a helpful assistant. Be concise and direct.")
         }
@@ -409,7 +409,7 @@ class MainActivity : FlutterActivity() {
         if (!context.isNullOrBlank()) {
             sb.append("DOCUMENT:\n")
             sb.append(context)
-            sb.append("\n\nQUESTION: ")
+            sb.append("\n\nBased on the document above, answer this question: ")
             sb.append(userText)
         } else {
             sb.append(userText)
@@ -425,11 +425,12 @@ class MainActivity : FlutterActivity() {
         val sb = StringBuilder()
         sb.append("<bos><start_of_turn>user\n")
         if (!context.isNullOrBlank()) {
-            sb.append("You are a helpful document assistant. Be concise — answer in a few sentences unless asked for detail. ")
-            sb.append("Answer using the document first, then briefly add your own knowledge if helpful.\n\n")
+            sb.append("You are a precise document assistant. Answer using ONLY the provided document text. ")
+            sb.append("Quote or reference specific parts to support your answer. ")
+            sb.append("If the document doesn't contain enough information, state that clearly.\n\n")
             sb.append("DOCUMENT:\n")
             sb.append(context)
-            sb.append("\n\nQUESTION: ")
+            sb.append("\n\nBased on the document above, answer this question: ")
             sb.append(userText)
         } else {
             sb.append(userText)

@@ -42,15 +42,23 @@ class ObjectBoxService {
 
   /// Smart chunking: splits raw text into semantically meaningful chunks
   /// with overlap so boundary data isn't lost.
+  /// Works for any document type: legal, medical, technical, academic, etc.
   Future<void> replaceChunksFromText(String text) async {
     _box.removeAll();
 
     final chunks = <String>[];
 
-    // 1. Try splitting by patient/record section headers
+    // 1. Try splitting by common document section headers
+    //    Matches numbered sections, titled headings, common structural patterns
     final sectionPattern = RegExp(
-      r'(?=Patient\s+\d+|Patient\s+Information|Apex\s+Healthcare|Record\s+\d+|Case\s+\d+)',
+      r'(?='
+      r'(?:^|\n)\s*(?:'
+        r'(?:CHAPTER|SECTION|ARTICLE|PART|TITLE|SCHEDULE|ANNEX|APPENDIX|EXHIBIT|CLAUSE)\s*[\d.:IVXLC]+'
+        r'|\d{1,3}(?:\.\d{1,3})*\s+[A-Z])'
+      r'|(?:^|\n)\s*[A-Z][A-Z ]{4,}(?:\n|:)'
+      r')',
       caseSensitive: false,
+      multiLine: true,
     );
     final sections = text.split(sectionPattern)
         .map((s) => s.trim())
@@ -167,35 +175,48 @@ class ObjectBoxService {
     'provided', 'dataset', 'levels',
   };
 
-  // Medical drug class → specific drug name mappings for synonym expansion
-  static const _medSynonyms = <String, List<String>>{
-    'fluoroquinolone': ['levofloxacin', 'moxifloxacin', 'ciprofloxacin', 'ofloxacin', 'norfloxacin'],
-    'macrolide': ['azithromycin', 'clarithromycin', 'erythromycin'],
-    'cephalosporin': ['ceftriaxone', 'cefuroxime', 'cephalexin', 'cefazolin', 'cefepime'],
-    'penicillin': ['amoxicillin', 'ampicillin', 'piperacillin'],
-    'carbapenem': ['meropenem', 'imipenem', 'ertapenem', 'doripenem'],
-    'aminoglycoside': ['gentamicin', 'tobramycin', 'amikacin'],
-    'tetracycline': ['doxycycline', 'minocycline', 'tetracycline'],
-    'nsaid': ['ibuprofen', 'naproxen', 'diclofenac', 'aspirin', 'celecoxib'],
-    'antibiotic': ['levofloxacin', 'moxifloxacin', 'azithromycin', 'ceftriaxone', 'amoxicillin', 'ciprofloxacin', 'doxycycline', 'vancomycin'],
-    'aki': ['acute kidney injury', 'creatinine', 'renal'],
-    'ckd': ['chronic kidney disease', 'renal', 'creatinine'],
-    'diagnosis': ['diagnosed', 'assessment', 'impression'],
+  // General-purpose synonym mappings for query expansion across domains.
+  // Covers common conceptual groupings found in legal, medical, technical,
+  // academic, and business documents.
+  static const _synonyms = <String, List<String>>{
+    // --- General document concepts ---
+    'definition': ['defined', 'means', 'refers to', 'interpretation'],
+    'obligation': ['shall', 'must', 'required', 'duty', 'responsible'],
+    'prohibition': ['prohibited', 'forbidden', 'restricted', 'banned', 'unlawful'],
+    'penalty': ['fine', 'punishment', 'sanction', 'damages', 'liability'],
+    'agreement': ['contract', 'covenant', 'arrangement', 'undertaking'],
+    'terminate': ['termination', 'cancel', 'revoke', 'rescind', 'end'],
+    'compensation': ['salary', 'wages', 'remuneration', 'payment', 'pay'],
+    'effective': ['commencement', 'operative', 'in force', 'enacted'],
+    'amendment': ['modify', 'amend', 'revise', 'alter', 'change'],
+    'liability': ['responsible', 'accountable', 'liable', 'obligation'],
+    'confidential': ['proprietary', 'secret', 'non-disclosure', 'private'],
+    'summary': ['overview', 'abstract', 'synopsis', 'brief'],
+    'conclusion': ['finding', 'determination', 'result', 'outcome'],
+    'recommendation': ['suggest', 'advise', 'propose', 'recommend'],
+    'requirement': ['prerequisite', 'condition', 'criteria', 'specification'],
+    'provision': ['clause', 'section', 'stipulation', 'term'],
+    'author': ['writer', 'contributor', 'creator'],
+    'cause': ['reason', 'basis', 'ground', 'rationale'],
+    'impact': ['effect', 'consequence', 'implication', 'result'],
+    // --- Medical (kept for backward compatibility) ---
+    'diagnosis': ['diagnosed', 'assessment', 'impression', 'finding'],
     'medication': ['prescribed', 'drug', 'treatment', 'therapy', 'medicine'],
     'prescribed': ['medication', 'received', 'administered', 'given'],
   };
 
-  /// Expand keywords with medical synonyms and prefix stems.
+  /// Expand keywords with synonyms and prefix stems.
+  /// Works across all domains (legal, medical, technical, etc.).
   List<String> _expandKeywords(List<String> keywords) {
     final expanded = <String>{...keywords};
 
     for (final kw in keywords) {
-      // Add synonym expansions
-      final syns = _medSynonyms[kw];
+      // Add synonym expansions (forward lookup)
+      final syns = _synonyms[kw];
       if (syns != null) expanded.addAll(syns);
 
-      // Reverse lookup: if 'levofloxacin' is queried, also find 'fluoroquinolone'
-      for (final entry in _medSynonyms.entries) {
+      // Reverse lookup: if a synonym value is queried, also add its key
+      for (final entry in _synonyms.entries) {
         if (entry.value.contains(kw)) {
           expanded.add(entry.key);
         }
@@ -244,17 +265,26 @@ class ObjectBoxService {
       }
     }
 
-    // 3. Detect "Patient N" patterns → also search for "patient N" as phrase
-    final patientMatch = RegExp(r'patient\s+(\d+)', caseSensitive: false)
-        .firstMatch(query);
-    if (patientMatch != null) {
-      keywords.add('patient ${patientMatch.group(1)}');
+    // 3. Detect labeled references: "Section 5", "Article 10", "Clause 3",
+    //    "Patient 7", "Chapter 2", "Item 4", "Part III", etc.
+    final labelPattern = RegExp(
+      r'(?:section|article|clause|chapter|part|item|schedule|patient|record|case|exhibit|paragraph)\s+(\w+)',
+      caseSensitive: false,
+    );
+    for (final m in labelPattern.allMatches(query)) {
+      keywords.add(m.group(0)!.toLowerCase());
     }
 
-    // 4. Detect parenthesized names like "(Thomas Wright)"
+    // 4. Detect parenthesized proper names like "(Thomas Wright)"
     final parenName = RegExp(r'\(([A-Z][a-z]+ [A-Z][a-z]+)\)').firstMatch(query);
     if (parenName != null) {
       keywords.add(parenName.group(1)!.toLowerCase());
+    }
+
+    // 5. Detect quoted phrases "like this" for exact matching
+    final quotedPhrases = RegExp(r'"([^"]+)"').allMatches(query);
+    for (final m in quotedPhrases) {
+      keywords.add(m.group(1)!.toLowerCase());
     }
 
     return keywords.toList();
@@ -315,18 +345,24 @@ class ObjectBoxService {
     return score;
   }
 
-  /// Detect if query is broad ("list all", "which patients", etc.)
+  /// Detect if query is broad ("list all", "summarize", "overview", etc.)
   bool _isBroadQuery(String query) {
     final lower = query.toLowerCase();
     return lower.contains('list all') ||
-           lower.contains('all patient') ||
-           lower.contains('which patient') ||
            lower.contains('how many') ||
-           lower.contains('every patient') ||
-           lower.contains('each patient') ||
            lower.contains('summarize') ||
            lower.contains('summary') ||
-           lower.contains('overview');
+           lower.contains('overview') ||
+           lower.contains('all of') ||
+           lower.contains('entire') ||
+           lower.contains('everything') ||
+           lower.contains('every ') ||
+           lower.contains('each ') ||
+           lower.contains('enumerate') ||
+           lower.contains('complete list') ||
+           lower.contains('main points') ||
+           lower.contains('key points') ||
+           lower.contains('highlight');
   }
 
   /// Returns up to [limit] chunks whose text contains any keyword from [query].

@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
+import 'package:path_provider/path_provider.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../providers/app_providers.dart';
@@ -252,12 +252,6 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
     if (_username == null || _jobId == null) return;
     final hfToken = _tokenCtrl.text.trim();
 
-    // Ask user to pick a save directory
-    final selectedDir = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Choose where to save the model',
-    );
-    if (selectedDir == null) return; // User cancelled
-
     setState(() {
       _downloading = true;
       _downloadProgress = 0;
@@ -265,14 +259,19 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
     });
 
     try {
-      final backend = ref.read(backendServiceProvider);
-      final saveDir = selectedDir;
+      // Save to internal app storage (not cache, not user-picked)
+      final appDir = await getApplicationDocumentsDirectory();
+      final modelsDir = Directory('${appDir.path}${Platform.pathSeparator}models');
+      if (!modelsDir.existsSync()) {
+        modelsDir.createSync(recursive: true);
+      }
 
-      final file = await backend.downloadModelFromHub(
+      final backend = ref.read(backendServiceProvider);
+      final result = await backend.downloadModelFromHub(
         hfToken: hfToken,
         username: _username!,
         jobId: _jobId!,
-        saveDir: saveDir,
+        saveDir: modelsDir.path,
         onProgress: (p) {
           if (mounted) setState(() => _downloadProgress = p);
         },
@@ -280,34 +279,34 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
 
       if (!mounted) return;
 
-      // Auto-detect tokenizer files next to the downloaded .pte
-      final dir = file.parent;
-      String? vocabPath;
-      String? configPath;
-      try {
-        final files = dir.listSync().whereType<File>();
-        for (final f in files) {
-          final name = f.path.split(Platform.pathSeparator).last.toLowerCase();
-          if (name == 'tokenizer.json' ||
-              name.endsWith('_vocab.json') ||
-              name == 'vocab.json') {
-            vocabPath = f.path;
-          }
-          if (name.endsWith('_tokenizer_config.json') ||
-              name == 'tokenizer_config.json') {
-            configPath = f.path;
-          }
-        }
-      } catch (_) {}
+      // Load model with downloaded tokenizer paths
+      ref.read(modelProvider.notifier).loadModel(
+            result.pteFile.path,
+            vocabPath: result.vocabPath,
+            configPath: result.configPath,
+          );
 
-      ref
-          .read(modelProvider.notifier)
-          .loadModel(file.path, vocabPath: vocabPath, configPath: configPath);
+      final downloadedFiles = <String>[result.pteFile.path.split(Platform.pathSeparator).last];
+      if (result.vocabPath != null) {
+        downloadedFiles.add(result.vocabPath!.split(Platform.pathSeparator).last);
+      }
+      if (result.configPath != null) {
+        downloadedFiles.add(result.configPath!.split(Platform.pathSeparator).last);
+      }
 
       setState(() {
         _downloading = false;
-        _modelPath = file.path;
+        _modelPath = result.pteFile.path;
       });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Downloaded: ${downloadedFiles.join(", ")}'),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
     } catch (e) {
       setState(() {
         _downloading = false;

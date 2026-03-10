@@ -2,6 +2,19 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 
+/// Result from downloading a model + tokenizer files from HuggingFace.
+class DownloadResult {
+  final File pteFile;
+  final String? vocabPath;
+  final String? configPath;
+
+  const DownloadResult({
+    required this.pteFile,
+    this.vocabPath,
+    this.configPath,
+  });
+}
+
 /// Response from POST /auth.
 class AuthResponse {
   final String status;
@@ -175,6 +188,66 @@ class BackendService {
     return null;
   }
 
+  /// Lists files in the HF repo folder and returns filenames for
+  /// tokenizer.json and tokenizer_config.json if found.
+  Future<Map<String, String?>> findTokenizerFiles({
+    required String hfToken,
+    required String username,
+    required String jobId,
+  }) async {
+    final repoId = '$username/compressed_models';
+    final dio = Dio();
+    String? tokenizerJson;
+    String? tokenizerConfig;
+
+    try {
+      final response = await dio.get(
+        '$_hfBaseUrl/api/models/$repoId/tree/main/$jobId',
+        options: Options(headers: {'Authorization': 'Bearer $hfToken'}),
+      );
+
+      final files = response.data as List<dynamic>;
+      for (final entry in files) {
+        final path = entry['path'] as String?;
+        if (path == null) continue;
+        final name = (path.contains('/') ? path.split('/').last : path)
+            .toLowerCase();
+        if (name == 'tokenizer.json') {
+          tokenizerJson = path.contains('/') ? path.split('/').last : path;
+        } else if (name == 'tokenizer_config.json') {
+          tokenizerConfig = path.contains('/') ? path.split('/').last : path;
+        }
+      }
+    } catch (_) {
+      // Tokenizer files are optional — don't fail the download
+    }
+
+    return {'tokenizer': tokenizerJson, 'config': tokenizerConfig};
+  }
+
+  /// Downloads a single file from a HuggingFace repo folder.
+  Future<File> downloadFileFromHub({
+    required String hfToken,
+    required String username,
+    required String jobId,
+    required String fileName,
+    required String savePath,
+  }) async {
+    final repoId = '$username/compressed_models';
+    final url = '$_hfBaseUrl/$repoId/resolve/main/$jobId/$fileName';
+
+    final dio = Dio();
+    await dio.download(
+      url,
+      savePath,
+      options: Options(
+        headers: {'Authorization': 'Bearer $hfToken'},
+        receiveTimeout: const Duration(minutes: 10),
+      ),
+    );
+    return File(savePath);
+  }
+
   /// Downloads a `.pte` model file from HuggingFace Hub.
   ///
   /// The file lives at `{username}/compressed_models/{jobId}/{pteFileName}`.
@@ -209,10 +282,11 @@ class BackendService {
     return File(savePath);
   }
 
-  /// Convenience: find the `.pte` in the job folder and download it.
+  /// Convenience: find the `.pte` in the job folder, download it along with
+  /// tokenizer files, and return a [DownloadResult] with all paths.
   ///
-  /// Returns the local [File] path, or throws if no `.pte` is found.
-  Future<File> downloadModelFromHub({
+  /// Files are saved to [saveDir] (typically internal app storage).
+  Future<DownloadResult> downloadModelFromHub({
     required String hfToken,
     required String username,
     required String jobId,
@@ -235,14 +309,56 @@ class BackendService {
       dir.createSync(recursive: true);
     }
 
-    final savePath = '${dir.path}${Platform.pathSeparator}$pteFileName';
-    return downloadPteFromHub(
+    // Download the .pte model
+    final pteSavePath = '${dir.path}${Platform.pathSeparator}$pteFileName';
+    final pteFile = await downloadPteFromHub(
       hfToken: hfToken,
       username: username,
       jobId: jobId,
       pteFileName: pteFileName,
-      savePath: savePath,
+      savePath: pteSavePath,
       onProgress: onProgress,
+    );
+
+    // Also download tokenizer files if available in the repo
+    String? vocabPath;
+    String? configPath;
+    final tokFiles = await findTokenizerFiles(
+      hfToken: hfToken,
+      username: username,
+      jobId: jobId,
+    );
+
+    if (tokFiles['tokenizer'] != null) {
+      final tokSavePath =
+          '${dir.path}${Platform.pathSeparator}${tokFiles['tokenizer']}';
+      await downloadFileFromHub(
+        hfToken: hfToken,
+        username: username,
+        jobId: jobId,
+        fileName: tokFiles['tokenizer']!,
+        savePath: tokSavePath,
+      );
+      vocabPath = tokSavePath;
+    }
+
+    if (tokFiles['config'] != null) {
+      final cfgSavePath =
+          '${dir.path}${Platform.pathSeparator}${tokFiles['config']}';
+      await downloadFileFromHub(
+        hfToken: hfToken,
+        username: username,
+        jobId: jobId,
+        fileName: tokFiles['config']!,
+        savePath: cfgSavePath,
+      );
+      configPath = cfgSavePath;
+    }
+
+    return DownloadResult(
+      pteFile: pteFile,
+      vocabPath: vocabPath,
+      configPath: configPath,
     );
   }
 }

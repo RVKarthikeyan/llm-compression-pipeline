@@ -333,8 +333,8 @@ class ChatNotifier extends Notifier<ChatState> {
     }
     final hasContext = contextChunks.isNotEmpty;
 
-    // Build context string, capped at 1500 chars to fit within
-    // model's actual max_context_len (~940 tokens) with prompt overhead.
+    // Build context string, capped at 2000 chars to fit within
+    // model's actual max_context_len with prompt overhead.
     // Smart trimming: if a chunk is very large but only partly relevant,
     // include just the most relevant portion to maximize information density.
     String? ctx;
@@ -342,7 +342,7 @@ class ChatNotifier extends Notifier<ChatState> {
       final buf = StringBuffer();
       int chunksUsed = 0;
       for (final chunk in contextChunks) {
-        final remaining = 1500 - buf.length;
+        final remaining = 2000 - buf.length;
         if (remaining < 50 && buf.isNotEmpty) break;
 
         String toAdd = chunk;
