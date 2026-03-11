@@ -338,27 +338,20 @@ class ChatNotifier extends Notifier<ChatState> {
     final totalChunks = obs.count;
     debugPrint('[RAG] ObjectBox has $totalChunks chunks');
 
-    // Always score chunks by relevance to the query using n-gram + entity matching.
-    // For small docs (≤30 chunks), score ALL chunks so we don't miss anything.
-    // For larger docs, use DB-level keyword pre-filter first.
-    List<String> contextChunks;
-    if (totalChunks > 0 && totalChunks <= 30) {
-      contextChunks = obs.scoredSearchAll(userText, limit: 5);
-      debugPrint('[RAG] Scored ALL $totalChunks chunks → ${contextChunks.length} selected');
-    } else {
-      contextChunks = obs.searchContext(userText, limit: 4);
-      debugPrint('[RAG] DB search → ${contextChunks.length} chunks');
-    }
+    // Scored keyword search returns chunks in RELEVANCE ORDER (highest
+    // scoring first). This ensures each query gets DIFFERENT context —
+    // the 3000 char cap below naturally keeps only the most relevant chunks.
+    final searchLimit = totalChunks <= 30 ? totalChunks : 8;
+    List<String> contextChunks = obs.searchContext(userText, limit: searchLimit);
+    debugPrint('[RAG] Scored search (limit=$searchLimit) → ${contextChunks.length} chunks');
     final hasContext = contextChunks.isNotEmpty;
 
-    // Build context string capped at ~3000 tokens (~12000 chars).
-    // Model has SEQ_LEN=4096 tokens. Budget:
-    //   system prompt ≈ 200 tokens, user query ≈ 50 tokens,
-    //   MAX_NEW_TOKENS=300 → ~3500 tokens available for context.
-    //   At ~4 chars/token, cap at 12000 chars for safety.
-    // Overlapping text between adjacent chunks is deduplicated to avoid
-    // wasting tokens on repeated content.
-    const contextCharCap = 12000;
+    // Build context string capped at ~750 tokens (~3000 chars).
+    // Chunks arrive in RELEVANCE ORDER (highest-scoring first), so the
+    // most relevant content fills the budget first. The cap ensures the
+    // 1B model (SEQ_LEN=2048) can attend to all context without overflow.
+    // Overlapping text between chunks is deduplicated to avoid waste.
+    const contextCharCap = 3000;
     String? ctx;
     final usedChunks = <String>[];
     if (hasContext) {

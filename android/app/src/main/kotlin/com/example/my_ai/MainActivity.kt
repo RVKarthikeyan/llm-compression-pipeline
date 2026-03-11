@@ -29,9 +29,9 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "ExecuTorch"
         private const val CHANNEL = "com.example.my_ai/executorch"
-        private const val MAX_NEW_TOKENS = 300
-        private const val SEQ_LEN = 4096
-        private const val TEMPERATURE = 0.1f
+        private const val MAX_NEW_TOKENS = 512
+        private const val SEQ_LEN = 2048
+        private const val TEMPERATURE = 0.0f
 
         /** EOS markers — if any of these appear as a token, stop generation. */
         private val EOS_TOKENS = listOf(
@@ -408,16 +408,10 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /** System prompt for RAG document Q&A — shared between all chat templates. */
-    private fun ragSystemPrompt(): String = """
-You are a precise document assistant. Follow these rules strictly:
-1. Answer ONLY using facts explicitly stated in the DOCUMENT below.
-2. Do NOT infer, assume, or add any information not present in the document.
-3. If the document mentions multiple related facts (e.g. a stated reason AND an underlying motivation), include ALL of them.
-4. If the answer is not in the document, say "The document does not contain this information."
-5. Be concise but complete. Do not omit key details like numbers, names, or amounts.
-6. Think step-by-step: First, identify ALL sentences in the document relevant to the question. Second, extract every fact, number, and name from those sentences. Third, synthesize a complete answer using only those extracted facts.
-7. If the document contains multiple separate topics, cases, or records, answer using ONLY the one that matches the question. Never combine facts from unrelated sections.""".trimIndent()
+    /** System prompt for RAG document Q&A — shared between all chat templates.
+     *  Kept SHORT — 1B models can't follow complex multi-sentence instructions. */
+    private fun ragSystemPrompt(): String =
+        "Answer the question accurately using the provided context."
 
     private fun formatLlama3(userText: String, context: String?): String {
         val sb = StringBuilder()
@@ -428,16 +422,17 @@ You are a precise document assistant. Follow these rules strictly:
         if (!context.isNullOrBlank()) {
             sb.append(ragSystemPrompt())
         } else {
-            sb.append("You are a helpful assistant. Be concise and direct.")
+            sb.append("You are a helpful assistant. Provide a detailed and complete answer.")
         }
         sb.append("<|eot_id|>")
 
         // User message
         sb.append("<|start_header_id|>user<|end_header_id|>\n\n")
         if (!context.isNullOrBlank()) {
-            sb.append("DOCUMENT:\n")
+            sb.append("<context>\n")
             sb.append(context)
-            sb.append("\n\nUsing ONLY the document above, answer this question: ")
+            sb.append("\n</context>\n\n")
+            sb.append("Question: ")
             sb.append(userText)
         } else {
             sb.append(userText)
@@ -454,9 +449,10 @@ You are a precise document assistant. Follow these rules strictly:
         sb.append("<bos><start_of_turn>user\n")
         if (!context.isNullOrBlank()) {
             sb.append(ragSystemPrompt())
-            sb.append("\n\nDOCUMENT:\n")
+            sb.append("\n\n<context>\n")
             sb.append(context)
-            sb.append("\n\nUsing ONLY the document above, answer this question: ")
+            sb.append("\n</context>\n\n")
+            sb.append("Question: ")
             sb.append(userText)
         } else {
             sb.append(userText)

@@ -91,127 +91,149 @@ class ObjectBoxService {
     return t.trim();
   }
 
+  /// LangChain-style RecursiveCharacterTextSplitter with section-awareness.
+  /// Splits on natural boundaries in priority order:
+  ///   major section headers → \n\n (paragraphs) → \n (lines) → ". " (sentences) → " " (words)
+  /// Only MAJOR document divisions (Case File, Chapter, Document #) trigger
+  /// section splits — subsections (Diagnosis:, Treatment:, etc.) are kept
+  /// together within their parent section.
+  List<String> _recursiveSplit(String text, {int chunkSize = 1000, int overlap = 200}) {
+    if (text.length <= chunkSize) return [text];
+
+    // First pass: split on MAJOR section boundaries only.
+    // Conservative: only fires on clearly distinct document divisions.
+    final sections = _splitOnSectionBoundaries(text);
+    if (sections.length >= 2) {
+      final chunks = <String>[];
+      for (final section in sections) {
+        if (section.length <= chunkSize) {
+          chunks.add(section);
+        } else {
+          chunks.addAll(_splitRecursive(section, ['\n\n', '\n', '. ', ' '], chunkSize, overlap));
+        }
+      }
+      return chunks;
+    }
+
+    // No major section headers found — fall back to standard separators
+    final separators = ['\n\n', '\n', '. ', ' '];
+    return _splitRecursive(text, separators, chunkSize, overlap);
+  }
+
+  /// Detect MAJOR document divisions only. Very conservative — only matches
+  /// patterns that clearly separate completely distinct topics:
+  ///   - "Case File: 24-CV-8892" (legal case files)
+  ///   - "Chapter 1", "CHAPTER IV" (book/report chapters)
+  ///   - "Document 1:", "Document 2:" (numbered documents)
+  /// Does NOT match subsection headers (Diagnosis:, Treatment:, Section 1.2, etc.)
+  /// to avoid fragmenting single-topic documents like medical records.
+  List<String> _splitOnSectionBoundaries(String text) {
+    final headerPattern = RegExp(
+      r'(?=(?:^|\n)\s*(?:'
+        // "Case File: ..." or "Case No. ..."
+        r'case\s+(?:file|no|number)\s*[:\-.]?\s*[\w\-]+'
+        // "Chapter 1", "CHAPTER IV"
+        r'|chapter\s+[\dIVXLCivxlc]+'
+        // "Document 1:", "Document 2:" (numbered docs in a batch)
+        r'|document\s+\d+\s*[:\-]'
+      r'))',
+      caseSensitive: false,
+      multiLine: true,
+    );
+
+    final matches = headerPattern.allMatches(text).toList();
+    if (matches.length < 2) return [text];
+
+    // Only accept splits that produce reasonably sized sections (≥200 chars each)
+    final sections = <String>[];
+    for (int i = 0; i < matches.length; i++) {
+      final start = matches[i].start;
+      final end = i + 1 < matches.length ? matches[i + 1].start : text.length;
+      final section = text.substring(start, end).trim();
+      if (section.length >= 200) sections.add(section);
+    }
+
+    // Add any text before the first header
+    if (matches.first.start > 200) {
+      sections.insert(0, text.substring(0, matches.first.start).trim());
+    }
+
+    return sections.length >= 2 ? sections : [text];
+  }
+
+  List<String> _splitRecursive(String text, List<String> separators, int chunkSize, int overlap) {
+    if (text.length <= chunkSize) return [text];
+    if (separators.isEmpty) {
+      // Last resort: hard cut with overlap
+      final chunks = <String>[];
+      int start = 0;
+      while (start < text.length) {
+        final end = (start + chunkSize).clamp(0, text.length);
+        chunks.add(text.substring(start, end));
+        start = end - overlap;
+        if (start >= text.length) break;
+        if (end == text.length) break;
+      }
+      return chunks;
+    }
+
+    final sep = separators.first;
+    final remainingSeps = separators.sublist(1);
+    final parts = text.split(sep).where((s) => s.trim().isNotEmpty).toList();
+
+    final chunks = <String>[];
+    String buffer = '';
+
+    for (final part in parts) {
+      final candidate = buffer.isEmpty ? part : '$buffer$sep$part';
+
+      if (candidate.length <= chunkSize) {
+        buffer = candidate;
+      } else if (buffer.isEmpty) {
+        // Single part exceeds chunkSize — recurse with finer separators
+        chunks.addAll(_splitRecursive(part, remainingSeps, chunkSize, overlap));
+      } else {
+        // Flush current buffer
+        chunks.add(buffer.trim());
+        // Carry overlap from end of buffer into next chunk
+        if (overlap > 0 && buffer.length > overlap) {
+          final overlapText = buffer.substring(buffer.length - overlap);
+          buffer = '$overlapText$sep$part';
+          // If even with overlap it's too big, just start fresh
+          if (buffer.length > chunkSize * 1.5) {
+            buffer = part;
+          }
+        } else {
+          buffer = part;
+        }
+      }
+    }
+    if (buffer.trim().isNotEmpty) chunks.add(buffer.trim());
+
+    return chunks;
+  }
+
   /// Smart chunking: splits raw text into semantically meaningful chunks
-  /// with overlap so boundary data isn't lost.
-  /// Works for any document type: legal, medical, technical, academic, etc.
+  /// using LangChain-style recursive character splitting.
+  /// chunk_size=1000, overlap=200 (matches LangChain best practices).
   Future<void> replaceChunksFromText(String text) async {
     _box.removeAll();
 
     // Sanitize text before chunking: strip markdown, normalize whitespace, etc.
     final cleanText = _sanitizeText(text);
 
-    final chunks = <String>[];
+    // Use recursive splitting (like LangChain's RecursiveCharacterTextSplitter)
+    var chunks = _recursiveSplit(cleanText, chunkSize: 1000, overlap: 200);
 
-    // 1. Try splitting by common document section headers
-    //    Matches numbered sections, titled headings, common structural patterns
-    final sectionPattern = RegExp(
-      r'(?='
-      r'(?:^|\n)\s*(?:'
-        r'(?:CHAPTER|SECTION|ARTICLE|PART|TITLE|SCHEDULE|ANNEX|APPENDIX|EXHIBIT|CLAUSE)\s*[\d.:IVXLC]+'
-        r'|\d{1,3}(?:\.\d{1,3})*\s+[A-Z])'
-      r'|(?:^|\n)\s*[A-Z][A-Z ]{4,}(?:\n|:)'
-      r')',
-      caseSensitive: false,
-      multiLine: true,
-    );
-    final sections = cleanText.split(sectionPattern)
-        .map((s) => s.trim())
-        .where((s) => s.length > 20)
-        .toList();
+    // Filter out tiny fragments
+    chunks = chunks.where((c) => c.trim().length > 20).toList();
 
-    if (sections.length >= 3) {
-      for (final section in sections) {
-        if (section.length <= 2000) {
-          chunks.add(section.trim());
-        } else {
-          // Split oversized sections on paragraph boundaries
-          final paras = section.split(RegExp(r'\n\s*\n'))
-              .map((s) => s.trim())
-              .where((s) => s.length > 10)
-              .toList();
-          String buffer = '';
-          for (final para in paras) {
-            if (buffer.isNotEmpty && buffer.length + para.length > 2000) {
-              chunks.add(buffer.trim());
-              // Overlap: keep last ~400 chars of previous chunk
-              final overlap = buffer.length > 400
-                  ? buffer.substring(buffer.length - 400)
-                  : buffer;
-              buffer = '$overlap\n\n$para';
-            } else {
-              buffer = buffer.isEmpty ? para : '$buffer\n\n$para';
-            }
-          }
-          if (buffer.trim().length > 10) chunks.add(buffer.trim());
-        }
-      }
-    }
-
-    // 2. If section-based splitting didn't produce enough chunks, try paragraphs
-    if (chunks.length < 3) {
-      chunks.clear();
-      final paragraphs = cleanText.split(RegExp(r'\n\s*\n'))
-          .map((s) => s.trim())
-          .where((s) => s.length > 20)
-          .toList();
-
-      if (paragraphs.length >= 3) {
-        String buffer = '';
-        for (final para in paragraphs) {
-          if (buffer.isNotEmpty &&
-              buffer.length + para.length > 1500 &&
-              buffer.length > 200) {
-            chunks.add(buffer.trim());
-            // Overlap: keep last ~300 chars to preserve context across boundaries
-            final overlap = buffer.length > 300
-                ? buffer.substring(buffer.length - 300)
-                : buffer;
-            buffer = '$overlap\n\n$para';
-          } else {
-            buffer = buffer.isEmpty ? para : '$buffer\n\n$para';
-          }
-        }
-        if (buffer.trim().length > 20) chunks.add(buffer.trim());
-      }
-    }
-
-    // 3. Final fallback: split by sentences, grouped into ~1000-char chunks
-    if (chunks.length < 3) {
-      chunks.clear();
-      final sentences = cleanText.split(RegExp(r'(?<=[.!?])\s+'))
-          .where((s) => s.trim().length > 5)
-          .toList();
-      String buffer = '';
-      for (final sent in sentences) {
-        if (buffer.isNotEmpty &&
-            buffer.length + sent.length > 1000 &&
-            buffer.length > 200) {
-          chunks.add(buffer.trim());
-          // Overlap: keep last 2 sentences worth (~200 chars)
-          final overlapStart = buffer.lastIndexOf('. ', buffer.length - 200);
-          buffer = overlapStart >= 0
-              ? '${buffer.substring(overlapStart + 2)} $sent'
-              : sent;
-        } else {
-          buffer = buffer.isEmpty ? sent : '$buffer $sent';
-        }
-      }
-      if (buffer.trim().length > 20) chunks.add(buffer.trim());
-    }
-
-    // 4. If still nothing, store the whole text as one chunk
-    if (chunks.isEmpty && cleanText.length > 20) {
-      chunks.add(cleanText);
-    }
-
-    // 5. Merge undersized chunks (< 200 chars) with their neighbor so we
-    //    don't produce dozens of tiny fragments from short paragraphs.
+    // Merge undersized chunks (< 200 chars) with their neighbor
     if (chunks.length > 1) {
       final merged = <String>[];
       String buffer = chunks.first;
       for (int i = 1; i < chunks.length; i++) {
         if (buffer.length < 200) {
-          // Too small — merge with next chunk
           buffer = '$buffer\n\n${chunks[i]}';
         } else {
           merged.add(buffer);
@@ -219,9 +241,12 @@ class ObjectBoxService {
         }
       }
       if (buffer.isNotEmpty) merged.add(buffer);
-      chunks
-        ..clear()
-        ..addAll(merged);
+      chunks = merged;
+    }
+
+    // If nothing survived, store the whole text
+    if (chunks.isEmpty && cleanText.length > 20) {
+      chunks = [cleanText];
     }
 
     final entities = chunks.map((t) => DocumentChunk(text: t)).toList();
@@ -248,9 +273,8 @@ class ObjectBoxService {
     'if', 'while', 'about', 'what', 'which', 'who', 'whom', 'this',
     'that', 'these', 'those', 'am', 'it', 'its', 'he', 'she', 'they',
     'them', 'his', 'her', 'my', 'your', 'our', 'their', 'me', 'him',
-    'us', 'you', 'i', 'we', 'tell', 'give', 'get', 'got', 'many',
-    'much', 'any', 'also', 'well', 'list', 'state', 'specific',
-    'provided', 'dataset', 'levels',
+    'us', 'you', 'i', 'we', 'tell', 'give', 'got', 'many',
+    'much', 'any', 'also', 'well',
   };
 
   // General-purpose synonym mappings for query expansion across domains.
@@ -277,10 +301,30 @@ class ObjectBoxService {
     'author': ['writer', 'contributor', 'creator'],
     'cause': ['reason', 'basis', 'ground', 'rationale'],
     'impact': ['effect', 'consequence', 'implication', 'result'],
-    // --- Medical (kept for backward compatibility) ---
+    // --- Medical ---
     'diagnosis': ['diagnosed', 'assessment', 'impression', 'finding'],
     'medication': ['prescribed', 'drug', 'treatment', 'therapy', 'medicine'],
     'prescribed': ['medication', 'received', 'administered', 'given'],
+    // --- CS / DSA / Math ---
+    'algorithm': ['method', 'approach', 'technique', 'procedure'],
+    'complexity': ['time complexity', 'space complexity', 'big-o', 'runtime'],
+    'array': ['list', 'vector', 'sequence'],
+    'tree': ['binary tree', 'bst', 'trie', 'heap'],
+    'graph': ['network', 'vertices', 'edges', 'nodes'],
+    'sort': ['sorting', 'sorted', 'order', 'arrange'],
+    'search': ['find', 'lookup', 'query', 'locate'],
+    'function': ['method', 'procedure', 'routine', 'subroutine'],
+    'recursive': ['recursion', 'recurrence', 'base case'],
+    'iterate': ['iteration', 'loop', 'traverse', 'traversal'],
+    'stack': ['lifo', 'push', 'pop'],
+    'queue': ['fifo', 'enqueue', 'dequeue'],
+    'hash': ['hashing', 'hash table', 'hash map', 'dictionary'],
+    'pointer': ['reference', 'address', 'node'],
+    'theorem': ['proof', 'lemma', 'corollary', 'proposition'],
+    'equation': ['formula', 'expression', 'identity'],
+    'solve': ['solution', 'compute', 'calculate', 'evaluate'],
+    'optimal': ['optimum', 'minimize', 'maximize', 'best'],
+    'example': ['instance', 'sample', 'illustration'],
   };
 
   /// Expand keywords with synonyms and prefix stems.
@@ -463,119 +507,49 @@ class ObjectBoxService {
            lower.contains('highlight');
   }
 
-  /// Returns up to [limit] chunks whose text matches keywords from [query].
-  /// Uses n-gram matching, entity detection, synonym expansion, weighted scoring,
-  /// and neighbor retrieval (index-based) to preserve boundary context.
+  /// Returns up to [limit] chunks sorted by RELEVANCE to [query].
+  /// Most relevant chunks come FIRST so they fill the context budget before
+  /// less relevant ones. This ensures each query gets DIFFERENT context.
+  ///
+  /// Uses keyword extraction, synonym expansion, and weighted scoring.
+  /// Always returns at least top-N chunks (never empty) so the model
+  /// never hallucinates from lack of context.
   List<String> searchContext(String query, {int limit = 5}) {
+    final all = _box.getAll();
+    if (all.isEmpty) return [];
+
     final rawKeywords = _extractKeywords(query);
     final keywords = _expandKeywords(rawKeywords);
     final broad = _isBroadQuery(query);
     final effectiveLimit = broad ? limit + 3 : limit;
 
-    final all = _box.getAll();
-    if (all.isEmpty) return [];
-
     if (keywords.isEmpty) {
       return all.take(effectiveLimit).map((e) => e.text).toList();
     }
 
-    // Score every chunk
-    final scores = <int, double>{};
+    // Score every chunk against the query keywords
+    final scored = <MapEntry<int, double>>[];
     for (int i = 0; i < all.length; i++) {
-      scores[i] = _scoreChunk(all[i].text, keywords);
+      scored.add(MapEntry(i, _scoreChunk(all[i].text, keywords)));
     }
 
-    // Rank by score
-    final ranked = scores.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
+    // Sort by score DESCENDING — most relevant first
+    scored.sort((a, b) => b.value.compareTo(a.value));
 
-    // Collect top hits + their immediate neighbors (index-based, not ID-based)
-    final selected = <int>{};
-    int added = 0;
-    for (final entry in ranked) {
-      if (entry.value < 1.0) break;
-      if (added >= effectiveLimit) break;
-      if (selected.add(entry.key)) added++;
-      if (entry.key > 0) selected.add(entry.key - 1);
-      if (entry.key < all.length - 1) selected.add(entry.key + 1);
-    }
-
-    if (selected.isEmpty) {
-      return all.take(effectiveLimit).map((e) => e.text).toList();
-    }
-
-    // Cap to effectiveLimit by re-scoring if neighbors pushed us over
-    final sorted = selected.toList()..sort();
-    if (sorted.length > effectiveLimit) {
-      final reScored = sorted.map((i) {
-        return MapEntry(scores[i] ?? 0.0, i);
-      }).toList()..sort((a, b) => b.key.compareTo(a.key));
-      final kept = reScored.take(effectiveLimit).map((e) => e.value).toList()..sort();
-      return kept.map((i) => all[i].text).toList();
-    }
-
-    return sorted.map((i) => all[i].text).toList();
+    // Return the top chunks by relevance (not document order!)
+    // This is the KEY: different queries → different top chunks → different context
+    return scored
+        .take(effectiveLimit)
+        .map((e) => all[e.key].text)
+        .toList();
   }
 
   /// Total number of stored chunks.
   int get count => _box.count();
 
-  /// Scores ALL chunks against [query] using n-grams, entities, synonyms,
-  /// and weighted scoring. For small documents (≤30 chunks).
-  /// Also pulls neighbor chunks (before/after top hits) so context that
-  /// spans a chunk boundary is never lost.
+  /// Same as searchContext but kept for API compatibility.
   List<String> scoredSearchAll(String query, {int limit = 5}) {
-    final all = _box.getAll();
-    if (all.isEmpty) return [];
-
-    final rawKeywords = _extractKeywords(query);
-    final keywords = _expandKeywords(rawKeywords);
-    final broad = _isBroadQuery(query);
-    final effectiveLimit = broad ? limit + 3 : limit;
-
-    if (keywords.isEmpty) {
-      return all.take(effectiveLimit).map((e) => e.text).toList();
-    }
-
-    // Score every chunk
-    final scores = <int, double>{};
-    for (int i = 0; i < all.length; i++) {
-      scores[i] = _scoreChunk(all[i].text, keywords);
-    }
-
-    // Find top-scoring indices
-    final ranked = scores.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-
-    // Collect top hits + their immediate neighbors (for boundary context)
-    final selected = <int>{};
-    int added = 0;
-    for (final entry in ranked) {
-      if (entry.value < 1.0) break;
-      if (added >= effectiveLimit) break;
-      if (selected.add(entry.key)) added++;
-      // Pull neighbor before and after so related facts aren't lost
-      if (entry.key > 0) selected.add(entry.key - 1);
-      if (entry.key < all.length - 1) selected.add(entry.key + 1);
-    }
-
-    if (selected.isEmpty) {
-      return all.take(effectiveLimit).map((e) => e.text).toList();
-    }
-
-    // Return in document order, capped to effectiveLimit
-    final sorted = selected.toList()..sort();
-
-    // If neighbors pushed us over the limit, re-score and keep the best
-    if (sorted.length > effectiveLimit) {
-      final reScored = sorted.map((i) {
-        return MapEntry(scores[i] ?? 0.0, i);
-      }).toList()..sort((a, b) => b.key.compareTo(a.key));
-      final kept = reScored.take(effectiveLimit).map((e) => e.value).toList()..sort();
-      return kept.map((i) => all[i].text).toList();
-    }
-
-    return sorted.map((i) => all[i].text).toList();
+    return searchContext(query, limit: limit);
   }
 
   /// Returns the first [n] chunk texts for preview purposes.
