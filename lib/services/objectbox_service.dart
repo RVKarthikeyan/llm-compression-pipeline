@@ -66,7 +66,7 @@ class ObjectBoxService {
   /// Maximum cosine distance for a chunk to be considered relevant.
   /// ObjectBox cosine distance: 0.0 = identical, 2.0 = opposite.
   /// 0.5 keeps only chunks that are meaningfully similar to the query.
-  static const double _scoreThreshold = 0.6;
+  static const double _scoreThreshold = 0.55;
 
   List<String> searchByVector(List<double> queryEmbedding, {int limit = 5}) {
     final totalChunks = _box.count();

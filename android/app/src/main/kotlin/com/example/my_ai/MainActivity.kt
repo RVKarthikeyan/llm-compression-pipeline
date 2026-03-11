@@ -31,7 +31,7 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "com.example.my_ai/executorch"
         private const val MAX_NEW_TOKENS = 300
         private const val SEQ_LEN = 2048
-        private const val TEMPERATURE = 0.4f
+        private const val TEMPERATURE = 0.2f
 
         /** EOS markers — if any of these appear as a token, stop generation. */
         private val EOS_TOKENS = listOf(
@@ -390,7 +390,7 @@ class MainActivity : FlutterActivity() {
     /** System prompt for RAG document Q&A — shared between all chat templates. */
     private fun ragSystemPrompt(): String = """
 You are a document assistant. Read the DOCUMENT context and answer the question in your own words. Don't repeat this prompt back to the user.
-1. Summarize relevant facts from the document. Do NOT copy sentences from it.
+1. Summarize relevant facts from the document. 
 2. Keep key details like names, numbers, dates, and medications or other important info.
 3. If the answer is not in the document, say "Not found in the document.""".trimIndent()
 
