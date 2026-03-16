@@ -1,602 +1,505 @@
 # LLM Compression Pipeline
 
-> **Knowledge Distillation for Domain-Specific Chatbot Development**  
-> A robust pipeline for creating specialized, mobile-optimized conversational AI models through knowledge distillation
+A capstone-grade, end-to-end monorepo for building domain-specialized compact language models and deploying them to mobile devices through a structured compression workflow.
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Hugging Face](https://img.shields.io/badge/🤗-Hugging%20Face-yellow)](https://huggingface.co/)
+The repository contains:
 
-## 📋 Table of Contents
+- mobile-app: Flutter client for authentication, orchestration, monitoring, retrieval, local indexing, and on-device inference integration.
+- api-backend: FastAPI service that executes pruning, distillation, quantization-export, and artifact publication.
 
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Detailed Usage](#detailed-usage)
-- [Project Structure](#project-structure)
-- [Technical Specifications](#technical-specifications)
-- [Results](#results)
-- [Applications](#applications)
-- [Troubleshooting](#troubleshooting)
-- [Future Enhancements](#future-enhancements)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
+## Table of Contents
 
-## 🌟 Overview
+1. Project Overview
+2. Problem and Design Goals
+3. Repository Structure
+4. Full System Architecture
+5. End-to-End Workflow
+6. Theory: Core Model Compression Methods
+7. Theory: Retrieval and Data Preparation Methods
+8. Theory: Mobile Inference and Runtime Integration
+9. Technology Stack and Module-Level Mapping
+10. API Reference
+11. How to Use This Repository
+12. How to Use the Mobile App
+13. Reproducibility and Experiment Tracking
+14. Validation and Evaluation Plan
+15. Operational Risks and Troubleshooting
+16. Security and Data Handling Notes
+17. Academic Project Notice
+18. Acknowledgments
 
-This project demonstrates an end-to-end **knowledge distillation pipeline** for creating domain-specific chatbots by transferring knowledge from a larger "teacher" model to a smaller, more efficient "student" model. The resulting models are optimized for deployment on mobile and edge devices while maintaining high-quality conversational capabilities.
+## 1. Project Overview
 
-### Key Concepts
+This project combines model compression research methods with practical software engineering to deliver deployable LLM artifacts for constrained environments.
 
-**Knowledge Distillation** is a model compression technique where:
+The backend executes a staged compression pipeline:
 
-- A smaller "student" model learns to mimic a larger "teacher" model's behavior
-- Enables deployment on resource-constrained devices
-- Preserves the teacher model's knowledge with reduced computational requirements
-- Achieves faster inference times without significant quality loss
+1. Structured pruning with healing.
+2. Domain-oriented knowledge distillation.
+3. Mixed-precision quantization and ExecuTorch export.
+4. Artifact upload to a private Hugging Face model repository.
 
-### Models Used
+The Flutter application provides:
 
-- **Teacher Model:** Google Gemma 2 2B (Instruction-tuned) - Knowledge source
-- **Student Model:** Microsoft Phi-3 Mini (3.8B parameters) - Learns from teacher
-- **Knowledge Source:** Domain-specific PDF documents
-- **Deployment Format:** GGUF (GPT-Generated Unified Format) for mobile optimization
+- Credential input and secure storage.
+- Pipeline trigger and status polling.
+- PDF ingestion and local chunk store.
+- Model download and native inference bridge.
 
-## ✨ Features
+## 2. Problem and Design Goals
 
-- 🎓 **Knowledge Distillation:** Transfer domain expertise from large to small models
-- 📄 **PDF Knowledge Extraction:** Automatic extraction and processing of PDF documents with OCR support
-- 🔄 **Synthetic Data Generation:** Context-aware training data creation using teacher model
-- ⚡ **Parameter-Efficient Fine-Tuning:** LoRA (Low-Rank Adaptation) for efficient training
-- 📱 **Mobile Optimization:** GGUF conversion with 4-bit quantization for edge deployment
-- 🎯 **Domain Specialization:** Create expert chatbots for specific knowledge domains
-- 🔬 **Reproducible Pipeline:** Seeded random states for consistent results
-- 💾 **Memory Efficient:** 4-bit quantization reduces VRAM requirements
+### 2.1 Core Problem
 
-## 🏗️ Architecture
+Large language models are expensive in memory, latency, and compute. Direct deployment on edge/mobile platforms is often infeasible without aggressive optimization. Domain adaptation also requires robust pipelines that are reproducible and operable by non-terminal users.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Knowledge Distillation Pipeline              │
-└─────────────────────────────────────────────────────────────────┘
+### 2.2 Design Goals
 
-Phase 1: Knowledge Extraction
-┌──────────────────┐         ┌──────────────────┐
-│  PDF Document    │ ───────>│  Text Extraction │
-│  (Domain Data)   │         │  & Processing    │
-└──────────────────┘         └──────────────────┘
-                                      │
-                                      ▼
-Phase 2: Data Generation
-┌──────────────────┐         ┌──────────────────┐
-│  Teacher Model   │ ───────>│   Synthetic      │
-│  (Gemma 2 2B)    │         │  Conversations   │
-└──────────────────┘         └──────────────────┘
-                                      │
-                                      ▼
-Phase 3: Student Training
-┌──────────────────┐         ┌──────────────────┐
-│  Student Model   │ <───────│  LoRA Fine-Tune  │
-│  (Phi-3 Mini)    │         │  Supervised      │
-└──────────────────┘         └──────────────────┘
-                                      │
-                                      ▼
-Phase 4: Deployment Optimization
-┌──────────────────┐         ┌──────────────────┐
-│  GGUF Format     │ <───────│  Quantization &  │
-│  (Mobile-Ready)  │         │  Conversion      │
-└──────────────────┘         └──────────────────┘
-```
+- Preserve useful task quality while reducing deploy-time footprint.
+- Transfer teacher behavior into a smaller student model.
+- Keep adaptation cost manageable through parameter-efficient training.
+- Package outputs in mobile-compatible format.
+- Provide a practical UI-driven workflow for a capstone demonstration.
 
-## 🔧 Installation
+### 2.3 Non-Goals
 
-### Prerequisites
+- Full distributed production MLOps platform.
+- Training a foundation model from scratch.
+- Multi-tenant enterprise-grade identity and access management.
 
-- Python 3.8 or higher
-- CUDA-compatible GPU with minimum 16GB VRAM (T4 GPU recommended)
-- Hugging Face account with model access permissions
-- 10GB+ free disk space
+## 3. Repository Structure
 
-### Setup Instructions
-
-1. **Clone the repository:**
-
-```bash
-git clone https://github.com/RVKarthikeyan/llm-compression-pipeline.git
-cd llm-compression-pipeline
-```
-
-2. **Install dependencies:**
-
-```bash
-# Uninstall conflicting packages
-pip uninstall -y cudf-cu12 pylibcudf-cu12
-
-# Install core ML libraries
-pip install -U transformers accelerate bitsandbytes datasets trl peft huggingface_hub
-
-# Install utility libraries
-pip install -U PyPDF2 tqdm pytesseract pdf2image
-
-# Install system dependencies (Linux/Colab)
-apt-get install -y tesseract-ocr poppler-utils
-```
-
-3. **Request model access:**
-
-   - Visit [google/gemma-2-2b-it](https://huggingface.co/google/gemma-2-2b-it) and request access
-   - Visit [microsoft/Phi-3-mini-4k-instruct](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and request access
-   - Access is typically granted within 5-10 minutes
-
-4. **Authenticate with Hugging Face:**
-
-```python
-from huggingface_hub import login
-login(token="your_hf_token_here")
-```
-
-## 🚀 Quick Start
-
-### Basic Usage
-
-1. **Prepare your domain-specific PDF:**
-
-   - Place your PDF file in the project directory
-   - Update the `pdf_path` variable in the notebook
-
-2. **Run the notebook:**
-
-   - Open `llmcompression.ipynb` in Jupyter/Colab
-   - Execute cells sequentially
-   - Follow the interactive prompts
-
-3. **Expected outputs:**
-   - `domain_specific_chat_data.json` - Training dataset
-   - `phi3-domain-specialist.gguf` - FP16 model (~2.3 GB)
-   - `phi3-domain-specialist-q4_k_m.gguf` - Quantized model (~1.2 GB) **[Recommended]**
-
-### Runtime Expectations
-
-| Phase                | Duration      | Description                        |
-| -------------------- | ------------- | ---------------------------------- |
-| Setup                | 5-10 min      | Dependencies and authentication    |
-| Knowledge Generation | 15-20 min     | PDF extraction and data generation |
-| Model Training       | 30-45 min     | LoRA fine-tuning (main bottleneck) |
-| Conversion           | 10-15 min     | GGUF format and quantization       |
-| **Total**            | **1-2 hours** | Complete pipeline on T4 GPU        |
-
-## 📖 Detailed Usage
-
-### Phase 1: Environment Setup
-
-```python
-# Set random seeds for reproducibility
-import random, numpy as np, torch
-
-seed = 42
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-```
-
-### Phase 2: Knowledge Extraction
-
-```python
-# Load teacher model with 4-bit quantization
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
-)
-
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b-it")
-teacher_model = AutoModelForCausalLM.from_pretrained(
-    "google/gemma-2-2b-it",
-    quantization_config=bnb_config,
-    device_map="auto"
-)
-```
-
-### Phase 3: Synthetic Data Generation
-
-The pipeline automatically:
-
-1. Extracts text from PDF using OCR
-2. Chunks content into manageable segments
-3. Generates domain-specific Q&A pairs
-4. Creates multi-turn conversational examples
-5. Saves structured training data
-
-### Phase 4: Student Model Fine-Tuning
-
-```python
-# LoRA configuration
-from peft import LoraConfig
-
-lora_config = LoraConfig(
-    r=16,                    # LoRA rank
-    lora_alpha=32,           # Scaling factor
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM"
-)
-```
-
-Training parameters:
-
-- **Epochs:** 3
-- **Batch Size:** 4
-- **Learning Rate:** 2e-4
-- **Max Length:** 512 tokens
-- **Optimizer:** AdamW with paged optimizers
-
-### Phase 5: Model Conversion
-
-```bash
-# Convert to GGUF format
-python llama.cpp/convert_hf_to_gguf.py merged_model --outfile phi3-domain-specialist.gguf --outtype f16
-
-# Apply 4-bit quantization
-./llama.cpp/llama-quantize phi3-domain-specialist.gguf phi3-domain-specialist-q4_k_m.gguf Q4_K_M
-```
-
-## 📁 Project Structure
-
-```
 llm-compression-pipeline/
-│
-├── llmcompression.ipynb          # Main Jupyter notebook
-├── README.md                      # This file
-├── requirements.txt               # Python dependencies (optional)
-│
-├── data/                          # Generated data directory
-│   ├── domain_specific_chat_data.json
-│   └── olympics.pdf               # Example domain PDF
-│
-├── models/                        # Model outputs
-│   ├── phi3-domain-specialist/
-│   │   ├── adapter_config.json
-│   │   ├── adapter_model.safetensors
-│   │   └── training_args.bin
-│   │
-│   ├── merged_model/              # LoRA merged model
-│   │
-│   └── gguf/                      # GGUF exports
-│       ├── phi3-domain-specialist.gguf
-│       └── phi3-domain-specialist-q4_k_m.gguf
-│
-└── checkpoints/                   # Training checkpoints
-    └── checkpoint-{step}/
-```
-
-## 🔬 Technical Specifications
-
-### Model Configuration
-
-| Component                     | Specification                          |
-| ----------------------------- | -------------------------------------- |
-| **Teacher Model**             | Google Gemma 2 2B (Instruction-tuned)  |
-| **Student Model**             | Microsoft Phi-3 Mini (3.8B parameters) |
-| **Architecture**              | Transformer-based decoder              |
-| **Context Window**            | 4096 tokens                            |
-| **Training Method**           | LoRA (Low-Rank Adaptation)             |
-| **Trainable Parameters**      | ~1% of total parameters                |
-| **Quantization (Training)**   | 4-bit NF4 with double quantization     |
-| **Quantization (Deployment)** | FP16 / Q4_K_M                          |
-| **Deployment Format**         | GGUF (GPT-Generated Unified Format)    |
+- api-backend/
+  - api.py
+  - pruning_pipeline.py
+  - knowledge_distillation_pipeline.py
+  - quantization_export_pipeline.py
+  - requirements.txt
+  - setup.sh
+- mobile-app/
+  - lib/
+    - providers/
+    - services/
+    - views/
+    - models/
+    - main.dart
+  - android/
+  - ios/
+  - web/
+  - windows/
+  - linux/
+  - macos/
+- README.md
+- .gitignore
 
-### Hardware Requirements
+## 4. Full System Architecture
 
-| Component   | Minimum        | Recommended           |
-| ----------- | -------------- | --------------------- |
-| **GPU**     | 16GB VRAM (T4) | 24GB+ VRAM (A10/A100) |
-| **RAM**     | 16GB           | 32GB+                 |
-| **Storage** | 10GB free      | 20GB+ free            |
-| **CPU**     | 4 cores        | 8+ cores              |
+### 4.1 Logical Components
 
-### Model Sizes
+- Client Layer: Flutter app with Riverpod-managed state and platform channels.
+- API Layer: FastAPI service with background job orchestration.
+- ML Layer: Modular Python pipelines for pruning, distillation, export.
+- Storage Layer: User-scoped workspace folders plus Hugging Face artifact hosting.
 
-| Format           | Size   | Use Case               |
-| ---------------- | ------ | ---------------------- |
-| **Base Model**   | ~3.8GB | Original Phi-3 Mini    |
-| **LoRA Adapter** | ~50MB  | Training checkpoint    |
-| **Merged Model** | ~7.5GB | Pre-conversion         |
-| **FP16 GGUF**    | ~2.3GB | High-quality inference |
-| **Q4_K_M GGUF**  | ~1.2GB | Mobile deployment ✅   |
+### 4.2 Data Flow
 
-## 📊 Results
+1. User authenticates from mobile app.
+2. PDF is selected and uploaded to backend.
+3. Backend executes compression stages asynchronously.
+4. Job status is polled from app.
+5. Final .pte artifact is uploaded and can be downloaded by app.
+6. App can load model via native ExecuTorch bridge.
 
-### Performance Metrics
+## 5. End-to-End Workflow
 
-- **Training Loss:** Converges to ~0.5-0.7 after 3 epochs
-- **Inference Speed:** ~20-30 tokens/second on CPU (Q4_K_M)
-- **Memory Footprint:** ~2GB RAM for Q4_K_M model
-- **Response Quality:** Maintains 90%+ of teacher model quality
-- **Parameter Efficiency:** Only ~1% of parameters trained with LoRA
+### Stage A: Authentication and session bootstrap
 
-### Example Outputs
+- Endpoint: POST /auth
+- Backend verifies Hugging Face token.
+- W and B environment variables are set.
+- User workspace is created under api-backend/workspace/<hash>/.
 
-**Query:** "What are the key events in the Olympics?"
+### Stage B: Pipeline trigger
 
-**Response (Domain-Specific Model):**
+- Endpoint: POST /trigger-pipeline
+- PDF is saved to workspace.
+- Background task is queued.
 
-```
-The Olympics feature a wide range of athletic competitions across multiple sports.
-Key events include track and field, swimming, gymnastics, and team sports like
-basketball and soccer. Athletes compete for gold, silver, and bronze medals
-representing their countries...
-```
+### Stage C: Compression execution pipeline
 
-### Advantages
+1. Pruning stage from pruning_pipeline.py.
+2. Distillation stage from knowledge_distillation_pipeline.py.
+3. Quantization and export stage from quantization_export_pipeline.py.
+4. Upload stage to private Hugging Face model repository.
 
-✅ **Reduced Latency:** 3-5x faster inference than full-scale models  
-✅ **Lower Costs:** Minimal GPU requirements for deployment  
-✅ **Domain Expertise:** Specialized knowledge in target domain  
-✅ **Mobile-Ready:** Runs on smartphones and edge devices  
-✅ **Privacy-Friendly:** Can run entirely offline
+### Stage D: Status and retrieval
 
-## 🎯 Applications
+- Endpoint: GET /status returns stage and progress message.
+- App downloads .pte from Hugging Face via authenticated requests.
 
-This methodology can be applied to various domains:
+### Stage E: Optional embedding service
 
-### 1. **Legal Document Analysis**
+- Endpoint: POST /embed
+- PDF text extraction and chunking.
+- all-MiniLM-L6-v2 embeddings generated for downstream retrieval storage.
 
-- Contract interpretation
-- Case law research
-- Regulatory compliance guidance
+## 6. Theory: Core Model Compression Methods
 
-### 2. **Medical Literature Comprehension**
+### 6.1 Structured Pruning
 
-- Clinical guidelines assistance
-- Medical research summaries
-- Patient education materials
+Structured pruning removes model components at architecture level, such as complete layers, which is deployment-friendly relative to unstructured sparsity.
 
-### 3. **Technical Documentation**
+In this implementation:
 
-- API documentation chatbots
-- Software troubleshooting assistants
-- Product manual Q&A systems
+- Adjacent transformer layers are merged by parameter averaging.
+- layer_idx fields are corrected after merge to keep cache indexing consistent.
 
-### 4. **Academic Research Support**
+Why this matters:
 
-- Literature review assistance
-- Citation and reference help
-- Research methodology guidance
+- Dense graph is preserved.
+- Inference kernels remain conventional.
+- Memory and compute can drop significantly at deployment.
 
-### 5. **Corporate Policy Guidance**
+### 6.2 Pruning Shock and Healing
 
-- Employee handbook Q&A
-- Compliance policy interpretation
-- Internal knowledge management
+After structural edits, model behavior can degrade due to representational mismatch. The project addresses this with a LoRA-based healing phase that recovers capability without full fine-tuning cost.
 
-### 6. **Educational Content**
+### 6.3 Knowledge Distillation (Black-Box Practical Mode)
 
-- Personalized tutoring systems
-- Course material assistants
-- Exam preparation helpers
+Knowledge distillation transfers teacher behavior to student behavior.
 
-## 🛠️ Troubleshooting
+In this project, distillation follows a practical black-box style:
 
-### Common Issues
+- Teacher internals are not required at training time.
+- Teacher-generated outputs over synthetic prompts become supervision targets.
+- Student learns from response behavior grounded in document-derived context.
 
-#### 1. **Authentication Errors (401 Unauthorized)**
+### 6.4 LoRA (Low-Rank Adaptation)
 
-**Problem:** Cannot access Hugging Face models
+LoRA introduces trainable low-rank adapter matrices into selected projection layers while freezing most base weights.
 
-**Solution:**
+Advantages:
 
-- Request access to both Gemma 2 2B and Phi-3 Mini models
-- Wait 5-10 minutes for approval
-- Re-authenticate with valid token
-- Use 'Read' or 'Write' token (not 'Fine-grained')
+- Lower VRAM and training cost.
+- Faster adaptation iterations.
+- Easy adapter merge for final deployable checkpoints.
 
-#### 2. **CUDA Out of Memory**
+### 6.5 Mixed-Precision Quantization and Export
 
-**Problem:** GPU memory exhausted during training
+Mixed precision balances accuracy and efficiency by assigning different precision strategies to different operator categories.
 
-**Solution:**
+In this implementation:
 
-```python
-# Reduce batch size
-per_device_train_batch_size = 2  # Instead of 4
+- Linear layers use 8da4w style configuration.
+- Embedding layers use 8w style configuration.
+- Export path targets ExecuTorch and mobile-ready .pte artifacts.
 
-# Enable gradient checkpointing
-gradient_checkpointing = True
+### 6.6 Why these methods are combined
 
-# Clear GPU cache
-import torch
-torch.cuda.empty_cache()
-```
+Each method optimizes a different bottleneck:
 
-#### 3. **PDF Extraction Failures**
+- Structured pruning: architecture-level reduction.
+- Distillation: capability transfer.
+- LoRA: efficient adaptation.
+- Quantization: deploy-time speed and memory efficiency.
 
-**Problem:** Cannot extract text from PDF
+The combined effect is stronger than any single method alone for edge deployment.
 
-**Solution:**
+## 7. Theory: Retrieval and Data Preparation Methods
 
-- Verify PDF is not password-protected
-- Check PDF file path and spelling
-- Install OCR dependencies: `apt-get install tesseract-ocr poppler-utils`
-- Try alternative: Use `pdfplumber` for complex PDFs
+### 7.1 PDF text extraction and chunking
 
-#### 4. **Empty Training Dataset**
+The backend uses PyMuPDF for extraction. The app also supports local PDF extraction via Syncfusion for local chunking workflows.
 
-**Problem:** Data generation produces no examples
+### 7.2 Chunking strategy
 
-**Solution:**
+ObjectBox service implements multiple fallback chunking strategies:
 
-- Verify teacher model loaded successfully
-- Check PDF contains sufficient text
-- Customize `domain_prompts` list with specific questions
-- Review generation logs for errors
+- Section-aware splitting.
+- Paragraph-aware chunking with overlap.
+- Sentence-group fallback.
 
-#### 5. **GGUF Conversion Errors**
+This improves retrieval robustness when document structure varies.
 
-**Problem:** Conversion script fails
+### 7.3 Local retrieval heuristics in mobile app
 
-**Solution:**
+ObjectBox-backed query logic includes:
 
-```bash
-# Update llama.cpp
-cd llama.cpp
-git pull
-make clean && make
+- Stopword filtering.
+- N-gram keyword generation.
+- Domain synonym expansion.
+- Medical term mapping and reverse lookup support.
 
-# Verify merged model path
-ls merged_model/  # Should contain config.json and safetensors files
-```
+This supports practical context retrieval before inference calls.
 
-#### 6. **Poor Model Performance**
+### 7.4 Embedding theory reference
 
-**Problem:** Low-quality responses from fine-tuned model
+Sentence-transformers all-MiniLM-L6-v2 generates normalized dense vectors (384 dimensions), enabling semantic similarity search patterns and vector index integration.
 
-**Solution:**
+## 8. Theory: Mobile Inference and Runtime Integration
 
-- Increase training epochs (3 → 5)
-- Generate more training examples (50+ recommended)
-- Increase LoRA rank (16 → 32 or 64)
-- Use higher-quality, well-structured PDF documents
+### 8.1 ExecuTorch runtime integration
 
-### Pre-Execution Checklist
+Android native integration is implemented in MainActivity.kt with LlmModule.
 
-Before running the notebook, verify:
+The native layer handles:
 
-- [ ] GPU available: `torch.cuda.is_available()` returns `True`
-- [ ] Hugging Face authentication completed
-- [ ] PDF document uploaded to project directory
-- [ ] Model access granted (Gemma 2 2B and Phi-3 Mini)
-- [ ] Minimum 16GB GPU VRAM available
-- [ ] 10GB+ free disk space
+- Model and tokenizer load.
+- Token streaming callbacks.
+- Cache reset and stop controls.
+- Chat-template-aware prompt formatting support.
 
-### Monitoring Commands
+### 8.2 Platform channel bridge
 
-```bash
-# Check GPU usage
-nvidia-smi
+Flutter uses MethodChannel to communicate with native inference methods.
 
-# Monitor GPU in real-time
-watch -n 1 nvidia-smi
+Why this architecture is used:
 
-# Check disk space
-df -h
+- Leverages Flutter for cross-platform UI.
+- Keeps heavy inference runtime in native layer.
+- Enables token-level streaming updates to UI.
 
-# Monitor training progress
-tail -f training_output.log
-```
+### 8.3 State management and UI consistency
 
-## 🚀 Future Enhancements
+Riverpod notifiers manage model state, chat state, settings state, and async pipeline status transitions. This supports deterministic UI behavior and clean state transitions.
 
-### Planned Features
+## 9. Technology Stack and Module-Level Mapping
 
-1. **Retrieval-Augmented Generation (RAG)**
+## 9.1 Backend libraries and purpose
 
-   - Real-time document updates
-   - Vector database integration
-   - Dynamic knowledge retrieval
+- fastapi, uvicorn: API and ASGI runtime.
+- transformers, torch, bitsandbytes, accelerate: model loading and optimization.
+- peft, trl, datasets: LoRA and supervised fine-tuning flows.
+- PyMuPDF: document extraction.
+- sentence-transformers: embedding generation.
+- huggingface_hub: auth and artifact publication.
+- wandb: experiment logging and run tracking.
+- python-multipart: file upload support.
 
-2. **Multi-Document Integration**
+## 9.2 Flutter libraries and purpose
 
-   - Process multiple PDFs simultaneously
-   - Cross-document knowledge synthesis
-   - Hierarchical knowledge organization
+- flutter_riverpod: state and dependency management.
+- dio, http: network client and file download.
+- flutter_secure_storage: sensitive credential storage.
+- objectbox, objectbox_flutter_libs: local persistent store and retrieval cache.
+- file_picker: PDF selection.
+- syncfusion_flutter_pdf: PDF text extraction in app.
+- pointycastle: AES encryption utilities.
+- path, path_provider: file paths and local storage locations.
 
-3. **Advanced Quantization**
+## 9.3 Repository module mapping
 
-   - Experiment with Q5_K_M and Q6_K
-   - Mixed-precision inference
-   - Dynamic quantization strategies
+- api-backend/api.py:
+  - Session handling, job orchestration, endpoints, upload.
+- api-backend/pruning_pipeline.py:
+  - Structured pruning and healing flow.
+- api-backend/knowledge_distillation_pipeline.py:
+  - Teacher-student distillation and student adaptation.
+- api-backend/quantization_export_pipeline.py:
+  - Quantization plus ExecuTorch export.
+- mobile-app/lib/providers/app_providers.dart:
+  - Riverpod providers, model/chat state, secure settings.
+- mobile-app/lib/services/objectbox_service.dart:
+  - Chunk persistence and retrieval-oriented preprocessing.
+- mobile-app/lib/services/backend_service.dart:
+  - API requests and model artifact download.
+- mobile-app/android/app/src/main/kotlin/com/example/my_ai/MainActivity.kt:
+  - Native ExecuTorch bridge and streaming inference.
 
-4. **Cross-Lingual Support**
+## 10. API Reference
 
-   - Multi-language knowledge distillation
-   - Translation-aware training
-   - Multilingual chatbot creation
+### POST /auth
 
-5. **Continuous Learning**
+Form fields:
 
-   - Incremental fine-tuning from user interactions
-   - Active learning strategies
-   - Feedback-driven improvement
+- hf_token
+- wandb_api_key
 
-6. **Deployment Optimization**
+Returns:
 
-   - Docker containerization
-   - API endpoint creation (FastAPI/Flask)
-   - Cloud deployment templates
-   - Mobile SDK integration
+- status
+- username
+- user_hash
 
-7. **Evaluation Framework**
-   - Automated quality assessment
-   - Domain-specific benchmarks
-   - A/B testing capabilities
+### POST /trigger-pipeline
 
-## 🤝 Contributing
+Form fields:
 
-Contributions are welcome! Please follow these guidelines:
+- hf_token
+- pdf_file
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+Returns:
 
-### Development Guidelines
+- status
+- job_id
+- message
 
-- Follow PEP 8 style guidelines for Python code
-- Add docstrings to all functions and classes
-- Include unit tests for new features
-- Update documentation for significant changes
-- Maintain backward compatibility when possible
+### GET /status
 
-## 📄 License
+Query:
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- hf_token
 
-## 🙏 Acknowledgments
+Returns:
 
-### Models & Frameworks
+- job_id
+- status
+- message
+- pte_ready
 
-- **Google** for Gemma 2 2B model
-- **Microsoft** for Phi-3 Mini model
-- **Hugging Face** for Transformers library and model hub
-- **Meta AI** for llama.cpp conversion tools
+### POST /embed
 
-### Libraries & Tools
+Form fields:
 
-- [PyTorch](https://pytorch.org/) - Deep learning framework
-- [Transformers](https://huggingface.co/docs/transformers/) - Model implementations
-- [PEFT](https://github.com/huggingface/peft) - Parameter-efficient fine-tuning
-- [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) - Quantization
-- [TRL](https://github.com/huggingface/trl) - Transformer reinforcement learning
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF format and inference
+- hf_token
+- pdf_file
+- chunk_size optional
+- chunk_overlap optional
 
-### Research & Inspiration
+Returns:
 
-- Hinton et al. - "Distilling the Knowledge in a Neural Network" (2015)
-- Hu et al. - "LoRA: Low-Rank Adaptation of Large Language Models" (2021)
-- GGUF Format - GPT-Generated Unified Format for efficient model deployment
+- model
+- dimensions
+- count
+- chunks with embeddings
 
-## 📞 Contact & Support
+### GET /health
 
-- **Author:** RV Karthikeyan
-- **GitHub:** [@RVKarthikeyan](https://github.com/RVKarthikeyan)
-- **Repository:** [llm-compression-pipeline](https://github.com/RVKarthikeyan/llm-compression-pipeline)
-- **Issues:** [Report bugs or request features](https://github.com/RVKarthikeyan/llm-compression-pipeline/issues)
+Returns:
 
----
+- status
 
-<div align="center">
+## 11. How to Use This Repository
 
-**⭐ If you find this project helpful, please consider giving it a star! ⭐**
+### 11.1 Backend setup (manual, cross-platform)
 
-Made with ❤️ for the AI community
+From repository root:
 
-</div>
+1. cd api-backend
+2. python -m venv .venv
+3. Activate environment
+   - Windows PowerShell: .\.venv\Scripts\Activate.ps1
+   - Linux/Mac: source .venv/bin/activate
+4. pip install --upgrade pip
+5. pip install -r requirements.txt
+6. uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+
+### 11.2 Backend setup (script-based)
+
+1. cd api-backend
+2. chmod +x setup.sh
+3. ./setup.sh
+
+Notes:
+
+- setup.sh assumes bash and Linux utilities.
+- For Windows native, use manual setup or WSL.
+
+### 11.3 Mobile app setup
+
+1. cd mobile-app
+2. flutter clean
+3. flutter pub get
+4. flutter run
+
+### 11.4 Developer workflow recommendation
+
+- Keep backend terminal running.
+- Use emulator/device with reachable backend URL.
+- Verify /health endpoint before app-side auth.
+
+## 12. How to Use the Mobile App
+
+### 12.1 Prerequisites
+
+- Running backend server.
+- Hugging Face access token.
+- Weights and Biases API key.
+- Domain PDF file.
+
+### 12.2 In-app sequence
+
+1. Open Train and Download flow.
+2. Enter HF token, W and B key, backend URL.
+3. Authenticate.
+4. Pick PDF document.
+5. Trigger pipeline.
+6. Monitor status until completed.
+7. Download generated .pte model.
+8. Load model into native runtime from app controls.
+
+### 12.3 Backend URL notes
+
+- Android emulator default: http://10.0.2.2:8000
+- Physical device: use host LAN IP and open firewall port.
+
+## 13. Reproducibility and Experiment Tracking
+
+- Seed control is implemented in distillation pipeline.
+- W and B run metadata is logged for major training phases.
+- Recommended practice:
+  - Pin model revisions.
+  - Persist config snapshots per job_id.
+  - Archive stage outputs for auditability.
+
+## 14. Validation and Evaluation Plan
+
+Suggested evaluation dimensions:
+
+- Quality:
+  - Domain QA correctness and consistency.
+  - Hallucination rate.
+  - Response completeness.
+- Efficiency:
+  - Stage runtime distribution.
+  - GPU memory profile.
+  - Final artifact size.
+  - On-device latency and memory use.
+- Robustness:
+  - Failure recovery behavior.
+  - Sensitivity to prompt distribution shift.
+
+## 15. Operational Risks and Troubleshooting
+
+### Common failure classes
+
+- Authentication failure for gated models.
+- OOM during pruning or distillation.
+- Quantization/export dependency mismatch.
+- Missing tokenizer artifacts in export output.
+- App-to-backend network misconfiguration.
+
+### Practical remediation
+
+- Validate token permissions and model access.
+- Reduce training size or adjust batch/accumulation.
+- Verify optimum-cli resolution in export venv.
+- Confirm backend /health before pipeline trigger.
+- Use verbose logs for per-stage diagnostics.
+
+## 16. Security and Data Handling Notes
+
+- Treat HF tokens and W and B keys as secrets.
+- Use secure storage on client side.
+- Avoid plaintext logging of credentials.
+- Prefer private artifact repositories.
+- Define retention policy for workspace artifacts.
+
+## 17. Academic Project Notice
+
+This repository is part of a college capstone project. It is shared for academic learning, demonstration, and project evaluation.
+
+No formal open-source license is declared at this stage.
+
+If you intend to reuse substantial portions beyond academic context, consult the project team first and ensure compliance with upstream model and dataset terms.
+
+## 18. Acknowledgments
+
+Project team:
+
+- [Jaswin Kumar N R](https://github.com/gjaswin)
+- [Karthikeyan R V](https://github.com/RVKarthikeyan)
+- [Navamohan M](https://github.com/NavamohanM)
+- [Mohammed Thalha M](https://github.com/devmohammedthalha)
+
+The team acknowledges the open ML ecosystem, including Hugging Face, PyTorch, ExecuTorch, Flutter, and the research community that enabled these methods.

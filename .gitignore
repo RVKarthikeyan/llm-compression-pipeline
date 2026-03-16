@@ -1,0 +1,47 @@
+# Global OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Backend runtime artifacts
+api-backend/.venv/
+api-backend/.venv_main/
+api-backend/.venv_pte/
+api-backend/workspace/
+api-backend/optimum-executorch/
+api-backend/*.zip
+api-backend/*.pte
+
+# Flutter / Dart
+mobile-app/.dart_tool/
+mobile-app/.flutter-plugins
+mobile-app/.flutter-plugins-dependencies
+mobile-app/.packages
+mobile-app/build/
+mobile-app/**/Generated.xcconfig
+mobile-app/**/Flutter/ephemeral/
+
+# Android / Gradle
+mobile-app/android/.gradle/
+mobile-app/android/local.properties
+
+# iOS / macOS
+mobile-app/ios/Pods/
+mobile-app/ios/.symlinks/
+mobile-app/macos/Pods/
+mobile-app/macos/.symlinks/
+
+# Coverage / logs
+coverage/
+*.log
