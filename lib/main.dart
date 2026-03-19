@@ -13,9 +13,7 @@ Future<void> main() async {
 
   runApp(
     ProviderScope(
-      overrides: [
-        objectBoxProvider.overrideWithValue(objectBox),
-      ],
+      overrides: [objectBoxProvider.overrideWithValue(objectBox)],
       child: const LocalAiApp(),
     ),
   );

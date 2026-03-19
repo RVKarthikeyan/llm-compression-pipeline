@@ -13,9 +13,7 @@ class EncryptionService {
   final Uint8List _iv;
 
   /// Creates a service with a secure-random 256-bit key and 128-bit IV.
-  EncryptionService()
-      : _key = _randomBytes(32),
-        _iv = _randomBytes(16);
+  EncryptionService() : _key = _randomBytes(32), _iv = _randomBytes(16);
 
   static Uint8List _randomBytes(int n) {
     final rng = Random.secure();

@@ -41,24 +41,26 @@ class HomeView extends ConsumerWidget {
               Text(
                 'Welcome!',
                 style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color: const Color(0xFF1A1A2E),
-                    ),
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF1A1A2E),
+                ),
               ),
               const SizedBox(height: 8),
               Text(
                 'Your on-device AI companion',
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      color: Colors.grey.shade500,
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyLarge?.copyWith(color: Colors.grey.shade500),
               ),
 
               // ── Model-status badge ─────────────────────────────────────
               if (hasModel) ...[
                 const SizedBox(height: 12),
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: const Color(0xFFE8F5E9),
                     borderRadius: BorderRadius.circular(20),
@@ -66,8 +68,11 @@ class HomeView extends ConsumerWidget {
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.check_circle,
-                          size: 16, color: Color(0xFF43A047)),
+                      Icon(
+                        Icons.check_circle,
+                        size: 16,
+                        color: Color(0xFF43A047),
+                      ),
                       SizedBox(width: 6),
                       Text(
                         'Model loaded',
@@ -91,8 +96,7 @@ class HomeView extends ConsumerWidget {
                 subtitle: 'Set up your custom AI model from PDF knowledge',
                 onTap: () => Navigator.push(
                   context,
-                  MaterialPageRoute(
-                      builder: (_) => const TrainDownloadView()),
+                  MaterialPageRoute(builder: (_) => const TrainDownloadView()),
                 ),
               ),
               const SizedBox(height: 16),
@@ -165,18 +169,17 @@ class _NavCard extends StatelessWidget {
                   children: [
                     Text(
                       title,
-                      style:
-                          Theme.of(context).textTheme.titleMedium?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                color: const Color(0xFF1A1A2E),
-                              ),
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFF1A1A2E),
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       subtitle,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: Colors.grey.shade500,
-                          ),
+                        color: Colors.grey.shade500,
+                      ),
                     ),
                   ],
                 ),

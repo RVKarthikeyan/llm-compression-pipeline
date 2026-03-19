@@ -412,14 +412,14 @@ class ChatNotifier extends Notifier<ChatState> {
     }
     final hasContext = contextChunks.isNotEmpty;
 
-    // Build context string capped at ~1500 tokens (~6000 chars).
+    // Build context string capped at ~1000 tokens (~4000 chars).
     // Model reports max_seq_len=2048 tokens. Budget:
     //   system prompt ≈ 200 tokens, user query ≈ 50 tokens,
     //   MAX_NEW_TOKENS=300 → ~1500 tokens available for context.
-    //   At ~4 chars/token, cap at 6000 chars for safety.
+    //   At ~4 chars/token, cap at 4000 chars for safety.
     // Overlapping text between adjacent chunks is deduplicated to avoid
     // wasting tokens on repeated content.
-    const contextCharCap = 6000;
+    const contextCharCap = 4000;
     String? ctx;
     final usedChunks = <String>[];
     if (hasContext) {
@@ -454,11 +454,9 @@ class ChatNotifier extends Notifier<ChatState> {
           }
         }
 
-        // If chunk is too large for remaining budget, try to extract
-        // the most relevant sentences from it
+        // If chunk is too large for remaining budget, skip it
         if (toAdd.length > remaining && buf.isNotEmpty) {
-          toAdd = _trimChunkToFit(toAdd, userText, remaining - 2);
-          if (toAdd.isEmpty) break;
+          continue;
         }
 
         if (buf.isNotEmpty) buf.write('\n\n');

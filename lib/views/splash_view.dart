@@ -11,8 +11,7 @@ class SplashView extends StatefulWidget {
   State<SplashView> createState() => _SplashViewState();
 }
 
-class _SplashViewState extends State<SplashView>
-    with TickerProviderStateMixin {
+class _SplashViewState extends State<SplashView> with TickerProviderStateMixin {
   late final AnimationController _logoController;
   late final AnimationController _textController;
   late final AnimationController _subtitleController;
@@ -41,24 +40,24 @@ class _SplashViewState extends State<SplashView>
     _logoScale = Tween<double>(begin: 0.3, end: 1.0).animate(
       CurvedAnimation(parent: _logoController, curve: Curves.elasticOut),
     );
-    _logoOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _logoController, curve: Curves.easeIn),
-    );
+    _logoOpacity = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _logoController, curve: Curves.easeIn));
 
     // 2. "ELROND" text: slide up + fade in (400ms → 900ms)
     _textController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
     );
-    _textOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _textController, curve: Curves.easeOut),
-    );
+    _textOpacity = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _textController, curve: Curves.easeOut));
     _textSlide = Tween<Offset>(
       begin: const Offset(0, 0.5),
       end: Offset.zero,
-    ).animate(
-      CurvedAnimation(parent: _textController, curve: Curves.easeOut),
-    );
+    ).animate(CurvedAnimation(parent: _textController, curve: Curves.easeOut));
 
     // 3. Subtitle: slide up + fade in (700ms → 1100ms)
     _subtitleController = AnimationController(
@@ -68,12 +67,10 @@ class _SplashViewState extends State<SplashView>
     _subtitleOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(parent: _subtitleController, curve: Curves.easeOut),
     );
-    _subtitleSlide = Tween<Offset>(
-      begin: const Offset(0, 0.5),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(parent: _subtitleController, curve: Curves.easeOut),
-    );
+    _subtitleSlide =
+        Tween<Offset>(begin: const Offset(0, 0.5), end: Offset.zero).animate(
+          CurvedAnimation(parent: _subtitleController, curve: Curves.easeOut),
+        );
 
     // 4. Fade out entire screen before navigation
     _fadeOutController = AnimationController(
@@ -149,8 +146,10 @@ class _SplashViewState extends State<SplashView>
               children: [
                 // ── Animated logo with glowing ring ──
                 AnimatedBuilder(
-                  animation: Listenable.merge(
-                      [_logoController, _ringController]),
+                  animation: Listenable.merge([
+                    _logoController,
+                    _ringController,
+                  ]),
                   builder: (context, child) {
                     return Opacity(
                       opacity: _logoOpacity.value,
@@ -164,8 +163,7 @@ class _SplashViewState extends State<SplashView>
                             children: [
                               // Rotating glow ring
                               Transform.rotate(
-                                angle:
-                                    _ringController.value * 2 * pi,
+                                angle: _ringController.value * 2 * pi,
                                 child: Container(
                                   width: 155,
                                   height: 155,
@@ -173,14 +171,12 @@ class _SplashViewState extends State<SplashView>
                                     shape: BoxShape.circle,
                                     gradient: SweepGradient(
                                       colors: [
-                                        Colors.white
-                                            .withValues(alpha: 0.0),
-                                        Colors.white
-                                            .withValues(alpha: 0.3),
-                                        const Color(0xFFB39DDB)
-                                            .withValues(alpha: 0.4),
-                                        Colors.white
-                                            .withValues(alpha: 0.0),
+                                        Colors.white.withValues(alpha: 0.0),
+                                        Colors.white.withValues(alpha: 0.3),
+                                        const Color(
+                                          0xFFB39DDB,
+                                        ).withValues(alpha: 0.4),
+                                        Colors.white.withValues(alpha: 0.0),
                                       ],
                                     ),
                                   ),
@@ -191,25 +187,23 @@ class _SplashViewState extends State<SplashView>
                                 width: 130,
                                 height: 130,
                                 decoration: BoxDecoration(
-                                  borderRadius:
-                                      BorderRadius.circular(28),
+                                  borderRadius: BorderRadius.circular(28),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: const Color(0xFF7C4DFF)
-                                          .withValues(alpha: 0.4),
+                                      color: const Color(
+                                        0xFF7C4DFF,
+                                      ).withValues(alpha: 0.4),
                                       blurRadius: 30,
                                       spreadRadius: 5,
                                     ),
                                   ],
                                 ),
                                 child: ClipRRect(
-                                  borderRadius:
-                                      BorderRadius.circular(28),
+                                  borderRadius: BorderRadius.circular(28),
                                   child: Image.asset(
                                     'assets/images/elrond_icon.png',
                                     fit: BoxFit.cover,
-                                    errorBuilder: (_, e, s) =>
-                                        _fallbackIcon(),
+                                    errorBuilder: (_, e, s) => _fallbackIcon(),
                                   ),
                                 ),
                               ),
@@ -236,10 +230,7 @@ class _SplashViewState extends State<SplashView>
                         color: Colors.white,
                         letterSpacing: 12,
                         shadows: [
-                          Shadow(
-                            color: Color(0xFF7C4DFF),
-                            blurRadius: 20,
-                          ),
+                          Shadow(color: Color(0xFF7C4DFF), blurRadius: 20),
                         ],
                       ),
                     ),
@@ -307,11 +298,7 @@ class _SplashViewState extends State<SplashView>
         ),
       ),
       child: const Center(
-        child: Icon(
-          Icons.psychology,
-          size: 60,
-          color: Colors.white,
-        ),
+        child: Icon(Icons.psychology, size: 60, color: Colors.white),
       ),
     );
   }

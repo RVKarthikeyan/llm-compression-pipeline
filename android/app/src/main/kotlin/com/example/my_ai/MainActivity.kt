@@ -389,10 +389,11 @@ class MainActivity : FlutterActivity() {
 
     /** System prompt for RAG document Q&A — shared between all chat templates. */
     private fun ragSystemPrompt(): String = """
-You are a document assistant. Read the DOCUMENT context and answer the question in your own words. Don't repeat this prompt back to the user.
-1. Summarize relevant facts from the document. 
-2. Keep key details like names, numbers, dates, and medications or other important info.
-3. If the answer is not in the document, say "Not found in the document.""".trimIndent()
+You are a strict and helpful document assistant. Your task is to answer the user's question using ONLY the provided Context.
+- If the answer is not contained in the Context, say "Not found in the document."
+- Do not make up information.
+- Do not use outside knowledge.
+- Keep your answer concise and factual.""".trimIndent()
 
     private fun formatLlama3(userText: String, context: String?): String {
         val sb = StringBuilder()
@@ -410,9 +411,9 @@ You are a document assistant. Read the DOCUMENT context and answer the question 
         // User message
         sb.append("<|start_header_id|>user<|end_header_id|>\n\n")
         if (!context.isNullOrBlank()) {
-            sb.append("DOCUMENT:\n")
+            sb.append("Context:\n")
             sb.append(context)
-            sb.append("\n\nUsing ONLY the document above, answer this question: ")
+            sb.append("\n\nQuestion: ")
             sb.append(userText)
         } else {
             sb.append(userText)
@@ -429,9 +430,9 @@ You are a document assistant. Read the DOCUMENT context and answer the question 
         sb.append("<bos><start_of_turn>user\n")
         if (!context.isNullOrBlank()) {
             sb.append(ragSystemPrompt())
-            sb.append("\n\nDOCUMENT:\n")
+            sb.append("\n\nContext:\n")
             sb.append(context)
-            sb.append("\n\nUsing ONLY the document above, answer this question: ")
+            sb.append("\n\nQuestion: ")
             sb.append(userText)
         } else {
             sb.append(userText)
