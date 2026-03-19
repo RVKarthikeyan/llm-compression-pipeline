@@ -312,16 +312,61 @@ async def generate_embeddings(
         raise HTTPException(status_code=422, detail="No text could be extracted from the PDF.")
 
     # Chunk with overlap
-    chunks = []
-    step = max(chunk_size - chunk_overlap, 1)
-    for i in range(0, len(full_text), step):
-        chunk = full_text[i : i + chunk_size]
-        if len(chunk) > chunk_size // 4:
-            chunks.append(chunk)
+    # chunks = []
+    # step = max(chunk_size - chunk_overlap, 1)
+    # for i in range(0, len(full_text), step):
+    #     chunk = full_text[i : i + chunk_size]
+    #     if len(chunk) > chunk_size // 4:
+    #         chunks.append(chunk)
 
+
+    
+    # Better Chunking: Split by words to avoid slicing words in half
+    chunks = []
+    start = 0
+    full_text_len = len(full_text)
+
+    while start < full_text_len:
+        end = start + chunk_size
+
+        if end >= full_text_len:
+            # We reached the end of the document
+            chunk = full_text[start:].strip()
+            if chunk:  # Keep short endings, don't drop data!
+                chunks.append(chunk)
+            break
+
+        # Find the last space within our chunk boundary
+        last_space = full_text.rfind(" ", start, end)
+
+        # If no space is found, or the space is too close to the start
+        # (prevents infinite loops and tiny stuttering chunks)
+        if last_space == -1 or last_space <= start + (chunk_size // 4):
+            last_space = end
+            
+        chunk = full_text[start:last_space].strip()
+        
+        # Only keep non-empty chunks
+        if chunk:
+            chunks.append(chunk)
+            
+        # Calculate the target start position by stepping back by chunk_overlap
+        # Max() ensures we always move forward by at least 1 character to prevent infinite loops
+        next_start_target = max(start + 1, last_space - chunk_overlap)
+        
+        # Try to align the next start to the beginning of a word by finding 
+        # the first space AFTER our target overlap index
+        overlap_space = full_text.find(" ", next_start_target, last_space)
+        
+        if overlap_space != -1:
+            start = overlap_space + 1
+        else:
+            # Fallback if no convenient space is found in the overlap region
+            start = next_start_target
+            
     if not chunks:
         raise HTTPException(status_code=422, detail="PDF text too short to produce any chunks.")
-
+            
     # Generate embeddings
     embeddings = embedding_model.encode(chunks, show_progress_bar=False, normalize_embeddings=True)
 
