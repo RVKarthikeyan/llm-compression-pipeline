@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -241,6 +242,135 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
       }
     } catch (e) {
       // Silently continue polling on transient errors
+    }
+  }
+
+  Future<void> _showDownloadPreviousDialog() async {
+    final tokenCtrl = TextEditingController(text: _tokenCtrl.text);
+    final jobIdCtrl = TextEditingController();
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Download Previous Model'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: tokenCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'HuggingFace Token',
+                ),
+                obscureText: true,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: jobIdCtrl,
+                decoration: const InputDecoration(labelText: 'Job ID'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _downloadPreviousModel(
+                  tokenCtrl.text.trim(),
+                  jobIdCtrl.text.trim(),
+                );
+              },
+              child: const Text('Download'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _downloadPreviousModel(String hfToken, String jobId) async {
+    if (hfToken.isEmpty || jobId.isEmpty) return;
+
+    setState(() {
+      _downloading = true;
+      _downloadProgress = 0;
+      _error = null;
+    });
+
+    try {
+      final dio = Dio();
+      final whoamiRes = await dio.get(
+        'https://huggingface.co/api/whoami-v2',
+        options: Options(headers: {'Authorization': 'Bearer $hfToken'}),
+      );
+      final username = whoamiRes.data['name'] as String;
+
+      final appDir = await getApplicationDocumentsDirectory();
+      final modelsDir = Directory(
+        '${appDir.path}${Platform.pathSeparator}models',
+      );
+      if (!modelsDir.existsSync()) {
+        modelsDir.createSync(recursive: true);
+      }
+
+      final backend = ref.read(backendServiceProvider);
+      final result = await backend.downloadModelFromHub(
+        hfToken: hfToken,
+        username: username,
+        jobId: jobId,
+        saveDir: modelsDir.path,
+        onProgress: (p) {
+          if (mounted) setState(() => _downloadProgress = p);
+        },
+      );
+
+      if (!mounted) return;
+
+      // Load model with downloaded tokenizer paths
+      ref
+          .read(modelProvider.notifier)
+          .loadModel(
+            result.pteFile.path,
+            vocabPath: result.vocabPath,
+            configPath: result.configPath,
+          );
+
+      final downloadedFiles = <String>[
+        result.pteFile.path.split(Platform.pathSeparator).last,
+      ];
+      if (result.vocabPath != null) {
+        downloadedFiles.add(
+          result.vocabPath!.split(Platform.pathSeparator).last,
+        );
+      }
+      if (result.configPath != null) {
+        downloadedFiles.add(
+          result.configPath!.split(Platform.pathSeparator).last,
+        );
+      }
+
+      setState(() {
+        _downloading = false;
+        _modelPath = result.pteFile.path;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Downloaded: ${downloadedFiles.join(", ")}'),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _downloading = false;
+        _error = 'Download failed: $e';
+      });
     }
   }
 
@@ -656,6 +786,12 @@ class _TrainDownloadViewState extends ConsumerState<TrainDownloadView> {
                         : null,
                     icon: const Icon(Icons.download, size: 18),
                     label: const Text('Download from HuggingFace'),
+                  ),
+                  const SizedBox(height: 8),
+                  FilledButton.tonalIcon(
+                    onPressed: _showDownloadPreviousDialog,
+                    icon: const Icon(Icons.cloud_download, size: 18),
+                    label: const Text('Download Previous Model'),
                   ),
                   const SizedBox(height: 8),
                   Row(
