@@ -106,7 +106,7 @@ ok "PTE venv ready: $VENV_PTE"
 info "Verifying main venv"
 "$VENV_MAIN/bin/python" -c "
 import torch, transformers, peft, trl, datasets, bitsandbytes
-import fastapi, pytesseract
+import fastapi
 print(f'  torch         : {torch.__version__}')
 print(f'  transformers  : {transformers.__version__}')
 print(f'  peft          : {peft.__version__}')
